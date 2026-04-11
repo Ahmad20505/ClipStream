@@ -1,0 +1,134 @@
+{
+  "name": "clipforge",
+  "version": "1.0.0",
+  "description": "AI-powered automatic stream clipper for Twitch, YouTube, and Kick",
+  "author": "Ahmad Othman",
+  "main": "main.js",
+  "homepage": "./",
+  "scripts": {
+    "start": "concurrently \"vite\" \"wait-on http://localhost:5173 && electron .\"",
+    "dev": "concurrently \"vite\" \"electron .\"",
+    "build": "vite build && electron-builder",
+    "build:mac": "vite build && electron-builder --mac",
+    "build:win": "vite build && electron-builder --win",
+    "build:linux": "vite build && electron-builder --linux",
+    "preview": "vite preview",
+    "electron": "electron ."
+  },
+  "build": {
+    "appId": "com.clipforge.app",
+    "productName": "ClipForge",
+    "copyright": "Copyright © 2026 ClipForge",
+    "asar": false,
+    "directories": {
+      "output": "dist-electron",
+      "buildResources": "assets"
+    },
+    "files": [
+      "dist/**/*",
+      "main.js",
+      "preload.js",
+      "assets/icon.png",
+      "assets/icon.ico",
+      "assets/icon.icns",
+      "node_modules/**/*",
+      "!node_modules/.bin",
+      "!node_modules/electron/**/*",
+      "!node_modules/electron-builder/**/*",
+      "!node_modules/vite/**/*",
+      "!node_modules/@vitejs/**/*",
+      "!node_modules/concurrently/**/*"
+    ],
+    "mac": {
+      "category": "public.app-category.utilities",
+      "icon": "assets/icon.icns",
+      "hardenedRuntime": false,
+      "gatekeeperAssess": false,
+      "target": [
+        {
+          "target": "dmg",
+          "arch": [
+            "x64",
+            "arm64"
+          ]
+        },
+        {
+          "target": "zip",
+          "arch": [
+            "x64",
+            "arm64"
+          ]
+        }
+      ]
+    },
+    "dmg": {
+      "title": "ClipForge",
+      "contents": [
+        {
+          "x": 130,
+          "y": 220
+        },
+        {
+          "x": 410,
+          "y": 220,
+          "type": "link",
+          "path": "/Applications"
+        }
+      ]
+    },
+    "win": {
+      "icon": "assets/icon.ico",
+      "target": [
+        {
+          "target": "nsis",
+          "arch": [
+            "x64"
+          ]
+        },
+        {
+          "target": "portable",
+          "arch": [
+            "x64"
+          ]
+        }
+      ]
+    },
+    "nsis": {
+      "oneClick": false,
+      "allowToChangeInstallationDirectory": true,
+      "createDesktopShortcut": true,
+      "createStartMenuShortcut": true
+    },
+    "linux": {
+      "icon": "assets/icon.png",
+      "category": "Utility",
+      "target": [
+        "AppImage",
+        "deb"
+      ]
+    }
+  },
+  "dependencies": {
+    "axios": "^1.6.0",
+    "electron-store": "^8.1.0",
+    "electron-updater": "^6.1.7",
+    "fluent-ffmpeg": "^2.1.2",
+    "irc-framework": "^4.1.0",
+    "node-fetch": "^2.7.0",
+    "nodemailer": "^8.0.5",
+    "stripe": "^14.0.0",
+    "uuid": "^9.0.0",
+    "ws": "^8.14.2"
+  },
+  "devDependencies": {
+    "@vitejs/plugin-react": "^4.2.0",
+    "concurrently": "^8.2.2",
+    "electron": "^27.0.0",
+    "electron-builder": "^24.6.4",
+    "react": "^18.2.0",
+    "react-dom": "^18.2.0",
+    "vite": "^5.0.0",
+    "vite-plugin-electron": "^0.15.5",
+    "wait-on": "^9.0.5"
+  }
+}
