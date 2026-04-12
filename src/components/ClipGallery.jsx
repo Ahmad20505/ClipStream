@@ -1,4 +1,4 @@
-import { useState, useMemo } from 'react';
+import { useState, useMemo, useEffect, useRef } from 'react';
 
 const platformColors = { twitch: '#9146ff', youtube: '#ff0000', kick: '#53fc18' };
 
@@ -16,14 +16,208 @@ function timeAgo(ts) {
   return `${Math.floor(s / 86400)}d ago`;
 }
 
-function ClipCard({ clip, onDelete, onOpen }) {
+/* ── In-app video player modal ───────────────────────────────────────── */
+function ClipPlayer({ clip, onClose }) {
+  const videoRef = useRef(null);
+  const [playing, setPlaying] = useState(false);
+  const [progress, setProgress] = useState(0);
+  const [duration, setDuration] = useState(0);
+  const [currentTime, setCurrentTime] = useState(0);
+  const [volume, setVolume] = useState(1);
+  const [muted, setMuted] = useState(false);
+  const [fullscreen, setFullscreen] = useState(false);
+
+  // Close on Escape
+  useEffect(() => {
+    const handler = (e) => { if (e.key === 'Escape') onClose(); };
+    window.addEventListener('keydown', handler);
+    return () => window.removeEventListener('keydown', handler);
+  }, [onClose]);
+
+  // Auto-play on open
+  useEffect(() => {
+    const v = videoRef.current;
+    if (v) {
+      v.play().then(() => setPlaying(true)).catch(() => {});
+    }
+  }, []);
+
+  const togglePlay = () => {
+    const v = videoRef.current;
+    if (!v) return;
+    if (v.paused) { v.play(); setPlaying(true); }
+    else { v.pause(); setPlaying(false); }
+  };
+
+  const handleTimeUpdate = () => {
+    const v = videoRef.current;
+    if (!v) return;
+    setCurrentTime(v.currentTime);
+    setProgress(v.duration ? (v.currentTime / v.duration) * 100 : 0);
+  };
+
+  const handleLoaded = () => {
+    const v = videoRef.current;
+    if (v) setDuration(v.duration);
+  };
+
+  const handleSeek = (e) => {
+    const v = videoRef.current;
+    if (!v) return;
+    const rect = e.currentTarget.getBoundingClientRect();
+    const pct = (e.clientX - rect.left) / rect.width;
+    v.currentTime = pct * v.duration;
+  };
+
+  const handleVolume = (e) => {
+    const val = parseFloat(e.target.value);
+    setVolume(val);
+    if (videoRef.current) videoRef.current.volume = val;
+    setMuted(val === 0);
+  };
+
+  const toggleMute = () => {
+    const v = videoRef.current;
+    if (!v) return;
+    v.muted = !v.muted;
+    setMuted(v.muted);
+  };
+
+  const toggleFullscreen = () => {
+    const v = videoRef.current;
+    if (!v) return;
+    if (!document.fullscreenElement) {
+      v.requestFullscreen().then(() => setFullscreen(true)).catch(() => {});
+    } else {
+      document.exitFullscreen().then(() => setFullscreen(false)).catch(() => {});
+    }
+  };
+
+  const formatTime = (s) => {
+    if (!s || isNaN(s)) return '0:00';
+    const m = Math.floor(s / 60);
+    const sec = Math.floor(s % 60);
+    return `${m}:${String(sec).padStart(2, '0')}`;
+  };
+
+  const color = platformColors[clip.platform] || '#888';
+
+  return (
+    <div className="player-backdrop" onClick={(e) => { if (e.target === e.currentTarget) onClose(); }}>
+      <div className="player-modal">
+        {/* Header */}
+        <div className="player-header">
+          <div className="player-header-info">
+            <span className="player-platform-badge" style={{ background: color }}>{clip.platform}</span>
+            <span className="player-streamer">{clip.streamerName}</span>
+            <span className="player-filename">{clip.filename}</span>
+          </div>
+          <button className="player-close-btn" onClick={onClose} title="Close (Esc)">
+            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5">
+              <line x1="18" y1="6" x2="6" y2="18" /><line x1="6" y1="6" x2="18" y2="18" />
+            </svg>
+          </button>
+        </div>
+
+        {/* Video */}
+        <div className="player-video-wrap" onClick={togglePlay}>
+          <video
+            ref={videoRef}
+            src={`file://${clip.path}`}
+            onTimeUpdate={handleTimeUpdate}
+            onLoadedMetadata={handleLoaded}
+            onEnded={() => setPlaying(false)}
+            className="player-video"
+          />
+          {!playing && (
+            <div className="player-big-play">
+              <svg width="48" height="48" viewBox="0 0 24 24" fill="white">
+                <polygon points="5 3 19 12 5 21 5 3" />
+              </svg>
+            </div>
+          )}
+        </div>
+
+        {/* Controls */}
+        <div className="player-controls">
+          {/* Progress bar */}
+          <div className="player-progress-wrap">
+            <span className="player-time">{formatTime(currentTime)}</span>
+            <div className="player-progress-bar" onClick={handleSeek}>
+              <div className="player-progress-fill" style={{ width: `${progress}%` }} />
+              <div className="player-progress-thumb" style={{ left: `${progress}%` }} />
+            </div>
+            <span className="player-time">{formatTime(duration)}</span>
+          </div>
+
+          {/* Buttons */}
+          <div className="player-btns">
+            {/* Play/Pause */}
+            <button className="player-btn" onClick={togglePlay} title={playing ? 'Pause' : 'Play'}>
+              {playing ? (
+                <svg width="18" height="18" viewBox="0 0 24 24" fill="currentColor">
+                  <rect x="6" y="4" width="4" height="16" /><rect x="14" y="4" width="4" height="16" />
+                </svg>
+              ) : (
+                <svg width="18" height="18" viewBox="0 0 24 24" fill="currentColor">
+                  <polygon points="5 3 19 12 5 21 5 3" />
+                </svg>
+              )}
+            </button>
+
+            {/* Volume */}
+            <button className="player-btn" onClick={toggleMute} title="Mute">
+              {muted || volume === 0 ? (
+                <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                  <polygon points="11 5 6 9 2 9 2 15 6 15 11 19 11 5" />
+                  <line x1="23" y1="9" x2="17" y2="15" /><line x1="17" y1="9" x2="23" y2="15" />
+                </svg>
+              ) : (
+                <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                  <polygon points="11 5 6 9 2 9 2 15 6 15 11 19 11 5" />
+                  <path d="M19.07 4.93a10 10 0 0 1 0 14.14M15.54 8.46a5 5 0 0 1 0 7.07" />
+                </svg>
+              )}
+            </button>
+            <input
+              type="range" min="0" max="1" step="0.05"
+              value={muted ? 0 : volume}
+              onChange={handleVolume}
+              className="player-volume-slider"
+              title="Volume"
+            />
+
+            <div style={{ flex: 1 }} />
+
+            {/* Open in folder */}
+            <button className="player-btn" onClick={() => window.clipforge.clips.open(clip.path)} title="Show in Finder">
+              <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                <path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z" />
+              </svg>
+            </button>
+
+            {/* Fullscreen */}
+            <button className="player-btn" onClick={toggleFullscreen} title="Fullscreen">
+              <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                <path d="M8 3H5a2 2 0 0 0-2 2v3m18 0V5a2 2 0 0 0-2-2h-3m0 18h3a2 2 0 0 0 2-2v-3M3 16v3a2 2 0 0 0 2 2h3" />
+              </svg>
+            </button>
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+/* ── Clip card ───────────────────────────────────────────────────────── */
+function ClipCard({ clip, onDelete, onOpenFolder, onWatch }) {
   const [confirmDelete, setConfirmDelete] = useState(false);
   const color = platformColors[clip.platform] || '#888';
 
   return (
     <div className="clip-card">
-      {/* Thumbnail */}
-      <div className="clip-thumb" onClick={() => onOpen(clip.path)}>
+      {/* Thumbnail — click to watch in app */}
+      <div className="clip-thumb" onClick={() => onWatch(clip)}>
         {clip.thumbnail ? (
           <img src={`file://${clip.thumbnail}`} alt="" />
         ) : (
@@ -67,11 +261,22 @@ function ClipCard({ clip, onDelete, onOpen }) {
 
       {/* Actions */}
       <div className="clip-actions">
-        <button className="clip-action-btn" onClick={() => onOpen(clip.path)} title="Show in folder">
+        {/* Watch in app */}
+        <button className="clip-action-btn watch-btn" onClick={() => onWatch(clip)} title="Watch in app">
+          <svg width="13" height="13" viewBox="0 0 24 24" fill="currentColor">
+            <polygon points="5 3 19 12 5 21 5 3" />
+          </svg>
+          Watch
+        </button>
+
+        {/* Show in folder */}
+        <button className="clip-action-btn" onClick={() => onOpenFolder(clip.path)} title="Show in Finder">
           <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
             <path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z" />
           </svg>
         </button>
+
+        {/* Delete */}
         {confirmDelete ? (
           <div className="delete-confirm">
             <button className="clip-action-btn danger" onClick={() => onDelete(clip.id)}>✕ Delete</button>
@@ -89,11 +294,13 @@ function ClipCard({ clip, onDelete, onOpen }) {
   );
 }
 
+/* ── Main gallery ────────────────────────────────────────────────────── */
 export default function ClipGallery({ clips, onDelete, onOpenFolder }) {
   const [filterPlatform, setFilterPlatform] = useState('all');
   const [filterStreamer, setFilterStreamer] = useState('all');
   const [sortBy, setSortBy] = useState('newest');
   const [search, setSearch] = useState('');
+  const [watchingClip, setWatchingClip] = useState(null);
 
   const streamers = useMemo(() => {
     const names = [...new Set(clips.map(c => c.streamerName))].sort();
@@ -114,12 +321,13 @@ export default function ClipGallery({ clips, onDelete, onOpenFolder }) {
     return result;
   }, [clips, filterPlatform, filterStreamer, sortBy, search]);
 
-  const handleOpen = (clipPath) => {
-    window.clipforge.clips.open(clipPath);
-  };
-
   return (
     <div className="page">
+      {/* In-app player modal */}
+      {watchingClip && (
+        <ClipPlayer clip={watchingClip} onClose={() => setWatchingClip(null)} />
+      )}
+
       <div className="page-header">
         <div>
           <h1 className="page-title">Clip Gallery</h1>
@@ -141,7 +349,7 @@ export default function ClipGallery({ clips, onDelete, onOpenFolder }) {
             </svg>
           </div>
           <p className="empty-title">No clips yet</p>
-          <p className="empty-sub">Start monitoring streamers and ClipForge AI will automatically<br />detect and save hype moments for you</p>
+          <p className="empty-sub">Start monitoring streamers and ClipStream AI will automatically<br />detect and save hype moments for you</p>
         </div>
       ) : (
         <>
@@ -190,7 +398,13 @@ export default function ClipGallery({ clips, onDelete, onOpenFolder }) {
           ) : (
             <div className="clip-grid">
               {filtered.map(clip => (
-                <ClipCard key={clip.id} clip={clip} onDelete={onDelete} onOpen={handleOpen} />
+                <ClipCard
+                  key={clip.id}
+                  clip={clip}
+                  onDelete={onDelete}
+                  onOpenFolder={(path) => window.clipforge.clips.open(path)}
+                  onWatch={setWatchingClip}
+                />
               ))}
             </div>
           )}

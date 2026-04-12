@@ -48,6 +48,17 @@ const NAV_ITEMS = [
       </svg>
     ),
   },
+  {
+    id: 'help',
+    label: 'Help',
+    icon: (
+      <svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+        <circle cx="12" cy="12" r="10" />
+        <path d="M9.09 9a3 3 0 0 1 5.83 1c0 2-3 3-3 3" />
+        <line x1="12" y1="17" x2="12.01" y2="17" />
+      </svg>
+    ),
+  },
 ];
 
 const PLATFORM_CONFIG = [
@@ -77,7 +88,7 @@ export default function Sidebar({ page, onNavigate, monitorCount, clips = [] }) 
           </svg>
         </div>
         <div>
-          <p className="sidebar-logo-text">ClipForge</p>
+          <p className="sidebar-logo-text">ClipStream</p>
           <p className="sidebar-logo-sub">AI Stream Clipper</p>
         </div>
       </div>
@@ -149,7 +160,7 @@ export default function Sidebar({ page, onNavigate, monitorCount, clips = [] }) 
 
       {/* ── Version footer ──────────────────────────────────── */}
       <div style={{ padding: '12px 16px', borderTop: '1px solid rgba(255,255,255,0.05)', marginTop: 8 }}>
-        <p style={{ fontSize: 11, color: 'var(--text-muted)', textAlign: 'center' }}>ClipForge v1.0 · AI Edition</p>
+        <p style={{ fontSize: 11, color: 'var(--text-muted)', textAlign: 'center' }}>ClipStream v1.0 · AI Edition</p>
       </div>
 
     </aside>

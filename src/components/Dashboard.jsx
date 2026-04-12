@@ -219,7 +219,7 @@ export default function Dashboard({ monitors, clips, onNavigate }) {
           <h1 className="page-title">Dashboard</h1>
           <p className="page-subtitle">
             {stats.liveCount > 0
-              ? `${stats.liveCount} stream${stats.liveCount > 1 ? 's' : ''} live — ClipForge is watching 👀`
+              ? `${stats.liveCount} stream${stats.liveCount > 1 ? 's' : ''} live — ClipStream is watching 👀`
               : 'Your AI clipping command center'}
           </p>
         </div>
@@ -244,10 +244,10 @@ export default function Dashboard({ monitors, clips, onNavigate }) {
           <div style={{ fontSize: 36 }}>🚀</div>
           <div style={{ flex: 1 }}>
             <p style={{ fontSize: 16, fontWeight: 700, color: 'var(--text-primary)', marginBottom: 6, fontFamily: 'var(--font-display)' }}>
-              Welcome to ClipForge!
+              Welcome to ClipStream!
             </p>
             <p style={{ fontSize: 13, color: 'var(--text-secondary)', lineHeight: 1.6 }}>
-              Search for a streamer on Twitch, YouTube, or Kick — hit <strong style={{ color: 'var(--text-primary)' }}>Monitor</strong> and ClipForge will automatically clip their best moments as they happen.
+              Search for a streamer on Twitch, YouTube, or Kick — hit <strong style={{ color: 'var(--text-primary)' }}>Monitor</strong> and ClipStream will automatically clip their best moments as they happen.
             </p>
           </div>
           <button className="btn-primary" onClick={() => onNavigate('search')} style={{ flexShrink: 0 }}>
@@ -315,7 +315,7 @@ export default function Dashboard({ monitors, clips, onNavigate }) {
             <EmptyState
               icon={<svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5"><path d="m15 10 5 5-5 5"/><path d="M4 4v7a4 4 0 0 0 4 4h12"/></svg>}
               title="No clips yet"
-              sub="ClipForge will automatically save clips when it detects hype moments"
+              sub="ClipStream will automatically save clips when it detects hype moments"
             />
           ) : (
             clips.slice(0, 6).map(c => <ClipRow key={c.id} clip={c} />)
@@ -335,7 +335,7 @@ export default function Dashboard({ monitors, clips, onNavigate }) {
       }}>
         {[
           { step: '1', icon: '🔍', title: 'Find a Streamer', desc: 'Search Twitch, YouTube or Kick and hit Monitor' },
-          { step: '2', icon: '📡', title: 'AI Monitors Live', desc: 'ClipForge watches audio spikes + chat explosions' },
+          { step: '2', icon: '📡', title: 'AI Monitors Live', desc: 'ClipStream watches audio spikes + chat explosions' },
           { step: '3', icon: '🎬', title: 'Clip Auto-Saved', desc: 'Hype moments are clipped and saved automatically' },
         ].map((s, i, arr) => (
           <div key={s.step} style={{ display: 'flex', alignItems: 'center', gap: 32, flex: 1 }}>

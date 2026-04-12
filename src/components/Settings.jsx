@@ -162,7 +162,7 @@ export default function Settings({ settings, onSave, subscription, onLogout }) {
     smtpPort: 587,
     smtpUser: '',
     smtpPass: '',
-    smtpFromName: 'ClipForge',
+    smtpFromName: 'ClipStream',
     twitchClientId: '',
     twitchClientSecret: '',
     youtubeApiKey: '',
@@ -179,7 +179,7 @@ export default function Settings({ settings, onSave, subscription, onLogout }) {
       if (keys) setForm(f => ({ ...f, twitchClientId: keys.twitchClientId || '', twitchClientSecret: keys.twitchClientSecret || '', youtubeApiKey: keys.youtubeApiKey || '' }));
     }).catch(() => {});
     api.smtp?.get().then(s => {
-      if (s) setForm(f => ({ ...f, smtpHost: s.host || '', smtpPort: s.port || 587, smtpUser: s.user || '', smtpPass: s.pass || '', smtpFromName: s.fromName || 'ClipForge' }));
+      if (s) setForm(f => ({ ...f, smtpHost: s.host || '', smtpPort: s.port || 587, smtpUser: s.user || '', smtpPass: s.pass || '', smtpFromName: s.fromName || 'ClipStream' }));
     }).catch(() => {});
   }, []);
 
@@ -300,7 +300,7 @@ export default function Settings({ settings, onSave, subscription, onLogout }) {
           {/* Subscription info */}
           <SectionCard>
             <SectionHeader icon={Icon.crown} title="Subscription" subtitle="Your current plan and billing" />
-            <SettingRow label="Status" hint="Your ClipForge subscription">
+            <SettingRow label="Status" hint="Your ClipStream subscription">
               <div style={{ textAlign: 'right' }}>
                 <span style={{ display: 'inline-flex', alignItems: 'center', gap: 6, padding: '5px 12px', borderRadius: 20, fontSize: 12, fontWeight: 700, background: subscription?.active ? 'rgba(34,197,94,0.12)' : 'rgba(107,114,128,0.12)', color: subscription?.active ? '#4ade80' : '#9ca3af', border: `1px solid ${subscription?.active ? 'rgba(34,197,94,0.3)' : 'rgba(107,114,128,0.2)'}` }}>
                   <span style={{ width: 6, height: 6, borderRadius: '50%', background: 'currentColor' }} />
@@ -364,7 +364,7 @@ export default function Settings({ settings, onSave, subscription, onLogout }) {
           </SectionCard>
 
           <SectionCard>
-            <SectionHeader icon={Icon.detection} title="AI Detection Sensitivity" subtitle="ClipForge learns each streamer's baseline, then clips only genuine spike moments" />
+            <SectionHeader icon={Icon.detection} title="AI Detection Sensitivity" subtitle="ClipStream learns each streamer's baseline, then clips only genuine spike moments" />
 
             {/* Sensitivity slider */}
             <SliderRow
@@ -389,7 +389,7 @@ export default function Settings({ settings, onSave, subscription, onLogout }) {
             {/* How it works explanation */}
             <div style={{ padding: '14px 0 16px', borderBottom: '1px solid rgba(255,255,255,0.05)' }}>
               <div style={{ fontSize: 12, color: 'var(--text-muted)', lineHeight: 1.7 }}>
-                <strong style={{ color: 'var(--text-secondary)' }}>How it works:</strong> ClipForge spends the first 60 seconds of each stream learning that streamer's <em>normal</em> audio level and chat speed. It only clips when both spike significantly above their personal baseline — so a loud creator like RampageJackson won't get clipped every second, only during real hype moments.
+                <strong style={{ color: 'var(--text-secondary)' }}>How it works:</strong> ClipStream spends the first 60 seconds of each stream learning that streamer's <em>normal</em> audio level and chat speed. It only clips when both spike significantly above their personal baseline — so a loud creator like RampageJackson won't get clipped every second, only during real hype moments.
               </div>
             </div>
 
@@ -496,6 +496,7 @@ export default function Settings({ settings, onSave, subscription, onLogout }) {
               <span style={{ fontSize: 13, color: 'var(--text-secondary)' }}>Fully supported · No configuration required</span>
             </div>
           </SectionCard>
+
         </>
       )}
 
@@ -503,7 +504,7 @@ export default function Settings({ settings, onSave, subscription, onLogout }) {
       {tab === 'receipts' && (
         <>
           <div style={{ padding: '12px 16px', background: 'rgba(37,99,235,0.08)', border: '1px solid rgba(37,99,235,0.2)', borderRadius: 10, marginBottom: 16, fontSize: 13, color: '#93c5fd', lineHeight: 1.5 }}>
-            📧 ClipForge will automatically email you a receipt every time your subscription renews. Fill in your SMTP details below to enable this.
+            📧 ClipStream will automatically email you a receipt every time your subscription renews. Fill in your SMTP details below to enable this.
           </div>
           <SectionCard>
             <SectionHeader icon={Icon.mail} title="SMTP Configuration" subtitle="Used to send your monthly renewal receipts" />
@@ -529,12 +530,12 @@ export default function Settings({ settings, onSave, subscription, onLogout }) {
             </div>
             <div style={{ padding: '16px 0' }}>
               <div style={{ fontSize: 12, fontWeight: 600, color: 'var(--text-muted)', textTransform: 'uppercase', letterSpacing: '0.05em', marginBottom: 8 }}>Sender Name</div>
-              <input className="sf-input" value={form.smtpFromName} onChange={e => set('smtpFromName', e.target.value)} placeholder="ClipForge" />
+              <input className="sf-input" value={form.smtpFromName} onChange={e => set('smtpFromName', e.target.value)} placeholder="ClipStream" />
             </div>
           </SectionCard>
 
           <div style={{ padding: '14px 18px', background: 'rgba(255,255,255,0.03)', border: '1px solid rgba(255,255,255,0.07)', borderRadius: 10, fontSize: 12, color: 'var(--text-muted)', lineHeight: 1.6 }}>
-            <strong style={{ color: 'var(--text-secondary)' }}>Using Gmail?</strong> Go to your Google Account → Security → 2-Step Verification → App Passwords. Generate one for "ClipForge" and use it here instead of your regular password.
+            <strong style={{ color: 'var(--text-secondary)' }}>Using Gmail?</strong> Go to your Google Account → Security → 2-Step Verification → App Passwords. Generate one for "ClipStream" and use it here instead of your regular password.
           </div>
         </>
       )}
@@ -543,7 +544,7 @@ export default function Settings({ settings, onSave, subscription, onLogout }) {
       {showLogoutConfirm && (
         <div className="modal-overlay">
           <div className="modal-card logout-confirm">
-            <h3>Sign out of ClipForge?</h3>
+            <h3>Sign out of ClipStream?</h3>
             <p>You'll need to sign back in with your email and password to use the app.</p>
             <div className="modal-actions">
               <button className="btn-cancel" onClick={() => setShowLogoutConfirm(false)} disabled={loggingOut}>Cancel</button>

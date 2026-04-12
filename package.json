@@ -1,5 +1,5 @@
 {
-  "name": "clipforge",
+  "name": "clipstream",
   "version": "1.0.0",
   "description": "AI-powered automatic stream clipper for Twitch, YouTube, and Kick",
   "author": "Ahmad Othman",
@@ -16,9 +16,9 @@
     "electron": "electron ."
   },
   "build": {
-    "appId": "com.clipforge.app",
-    "productName": "ClipForge",
-    "copyright": "Copyright © 2026 ClipForge",
+    "appId": "com.clipstream.app",
+    "productName": "ClipStream",
+    "copyright": "Copyright © 2026 ClipStream",
     "asar": false,
     "directories": {
       "output": "dist-electron",
@@ -62,7 +62,7 @@
       ]
     },
     "dmg": {
-      "title": "ClipForge",
+      "title": "ClipStream",
       "contents": [
         {
           "x": 130,
@@ -112,6 +112,7 @@
     "axios": "^1.6.0",
     "electron-store": "^8.1.0",
     "electron-updater": "^6.1.7",
+    "ffmpeg-static": "^5.3.0",
     "fluent-ffmpeg": "^2.1.2",
     "irc-framework": "^4.1.0",
     "node-fetch": "^2.7.0",

@@ -46,7 +46,7 @@ export default function SignIn({ onSignIn, onGoToSignUp }) {
           </svg>
         </div>
         <h1 className="auth-title">Welcome back</h1>
-        <p className="auth-subtitle">Sign in to ClipForge</p>
+        <p className="auth-subtitle">Sign in to ClipStream</p>
 
         <form className="auth-form" onSubmit={handleSubmit}>
           <div className="auth-field">

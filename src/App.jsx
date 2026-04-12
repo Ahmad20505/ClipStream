@@ -5,6 +5,8 @@ import Dashboard from './components/Dashboard.jsx';
 import StreamerSearch from './components/StreamerSearch.jsx';
 import ActiveMonitors from './components/ActiveMonitors.jsx';
 import ClipGallery from './components/ClipGallery.jsx';
+import Help from './components/Help';
+import TutorialOverlay from './components/TutorialOverlay';
 import Settings from './components/Settings.jsx';
 import SubscriptionGate from './components/SubscriptionGate.jsx';
 import SignIn from './components/SignIn.jsx';
@@ -13,6 +15,7 @@ const api = window.clipforge;
 
 export default function App() {
   const [page, setPage] = useState('dashboard');
+  const [showTutorial, setShowTutorial] = useState(() => !localStorage.getItem('cs_tutorial_done'));
   const [subscription, setSubscription] = useState(null);
   const [monitors, setMonitors] = useState([]);
   const [clips, setClips] = useState([]);
@@ -182,7 +185,7 @@ export default function App() {
             </defs>
           </svg>
         </div>
-        <p className="loading-text">Loading ClipForge...</p>
+        <p className="loading-text">Loading ClipStream...</p>
         <div className="loading-spinner" />
       </div>
     );
@@ -225,7 +228,9 @@ export default function App() {
         return <ActiveMonitors monitors={monitors} onStop={handleStopMonitor} onNavigate={setPage} />;
       case 'clips':
         return <ClipGallery clips={clips} onDelete={handleDeleteClip} onOpenFolder={() => api.clips.openFolder()} />;
-      case 'settings':
+      case 'help':
+      return <Help />;
+    case 'settings':
         return <Settings settings={settings} onSave={handleSaveSettings} subscription={subscription} onLogout={handleLogout} />;
       default:
         return <Dashboard monitors={monitors} clips={clips} onNavigate={setPage} />;
@@ -243,6 +248,9 @@ export default function App() {
           </div>
         </main>
       </div>
+      {showTutorial && (
+        <TutorialOverlay onComplete={() => { setShowTutorial(false); localStorage.setItem('cs_tutorial_done', '1'); }} />
+      )}
       {toast && (
         <div className={`toast toast-${toast.type}`} key={toast.id}>
           <span className="toast-icon">

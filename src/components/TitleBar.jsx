@@ -17,7 +17,7 @@ export default function TitleBar() {
             </linearGradient>
           </defs>
         </svg>
-        <span className="titlebar-name">ClipForge</span>
+        <span className="titlebar-name">ClipStream</span>
       </div>
 
       {!isMac && (

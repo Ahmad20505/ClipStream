@@ -4,6 +4,9 @@ const fs = require('fs');
 const { spawn, exec } = require('child_process');
 const os = require('os');
 
+// ─── Bundled ffmpeg binary (no install needed) ───────────────────────────────
+const ffmpegPath = require('ffmpeg-static');
+
 // ─── Global EPIPE / uncaught-exception safety net ───────────────────────────
 // EPIPE (broken pipe) fires when one side of a pipe (streamlink → ffmpeg)
 // closes while the other is still writing. This is expected behaviour when
@@ -14,7 +17,7 @@ process.on('uncaughtException', (err) => {
     return;
   }
   // Re-throw anything else so Electron's default handler still sees it.
-  console.error('[ClipForge] Uncaught exception:', err);
+  console.error('[ClipStream] Uncaught exception:', err);
 });
 
 // ─── App Configuration ──────────────────────────────────────────────────────
@@ -48,7 +51,7 @@ async function initStore() {
       account: { email: null, passwordHash: null, createdAt: null },
       auth: { loggedIn: false },
       // SMTP settings for monthly receipts
-      smtp: { host: '', port: 587, user: '', pass: '', fromName: 'ClipForge' },
+      smtp: { host: '', port: 587, user: '', pass: '', fromName: 'ClipStream' },
       monitors: [],
       recentClips: [],
     },
@@ -66,8 +69,7 @@ function createWindow() {
     minWidth: 1100,
     minHeight: 700,
     frame: false,
-    titleBarStyle: 'hidden',
-    trafficLightPosition: { x: 16, y: 16 },
+    ...(process.platform === 'darwin' ? { titleBarStyle: 'hidden', trafficLightPosition: { x: 16, y: 16 } } : {}),
     backgroundColor: '#0a0a0f',
     webPreferences: {
       preload: path.join(__dirname, 'preload.js'),
@@ -94,10 +96,173 @@ app.whenReady().then(async () => {
   cleanupOldThumbnails();
   createWindow();
   scheduleRenewalCheck();
+  checkStreamlinkInstalled();
   app.on('activate', () => {
     if (BrowserWindow.getAllWindows().length === 0) createWindow();
   });
 });
+
+// ─── Streamlink Check ────────────────────────────────────────────────────────
+function checkStreamlinkInstalled() {
+  exec('streamlink --version', (err) => {
+    if (!err) return; // already installed — nothing to do
+
+    const isMac = process.platform === 'darwin';
+    const isWin = process.platform === 'win32';
+
+    // Not found — show a helpful install dialog after a short delay
+    // (so the main window has time to appear first)
+    setTimeout(() => {
+      const win = BrowserWindow.getAllWindows()[0];
+      if (!win) return;
+
+      const installBtn = isMac ? 'Install with Homebrew' : 'Install Automatically';
+
+      dialog.showMessageBox(win, {
+        type: 'warning',
+        title: 'streamlink not found',
+        message: 'ClipStream needs streamlink to record streams.',
+        detail: 'streamlink is a free, open-source tool that captures stream video. Without it, ClipStream can detect highlights but cannot save clips.\n\nClick "' + installBtn + '" to install it automatically, or visit streamlink.github.io to install manually.',
+        buttons: [installBtn, 'Install Manually', 'Remind Me Later'],
+        defaultId: 0,
+        cancelId: 2,
+      }).then(({ response }) => {
+        if (response === 0) {
+          if (isWin) {
+            installStreamlinkWindows(win);
+          } else {
+            installStreamlinkMac(win);
+          }
+        } else if (response === 1) {
+          shell.openExternal('https://streamlink.github.io');
+        }
+      });
+    }, 3000);
+  });
+}
+
+function installStreamlinkMac(win) {
+  const installWin = new BrowserWindow({
+    width: 500, height: 220,
+    resizable: false, minimizable: false, fullscreenable: false,
+    title: 'Installing streamlink…',
+    webPreferences: { nodeIntegration: false, contextIsolation: true },
+  });
+  installWin.loadURL('data:text/html,<html><body style="font-family:sans-serif;padding:24px;background:#111;color:#ccc"><h3 style="color:#a78bfa">Installing streamlink…</h3><p>Running: <code>brew install streamlink</code></p><p style="color:#888;font-size:13px">This may take a minute. The window will close when done.</p></body></html>');
+
+  // Try both common Homebrew paths (Intel /usr/local, Apple Silicon /opt/homebrew)
+  const brewCmd = 'export PATH="$PATH:/usr/local/bin:/opt/homebrew/bin" && brew install streamlink';
+  exec(brewCmd, { shell: '/bin/bash' }, (brewErr) => {
+    try { installWin.close(); } catch {}
+    if (brewErr) {
+      dialog.showMessageBox(win, {
+        type: 'info',
+        title: 'Install streamlink manually',
+        message: 'Homebrew install failed.',
+        detail: 'Please visit streamlink.github.io to download and install streamlink manually, then restart ClipStream.',
+        buttons: ['Open streamlink.github.io', 'OK'],
+        defaultId: 0,
+      }).then(({ response: r }) => {
+        if (r === 0) shell.openExternal('https://streamlink.github.io');
+      });
+    } else {
+      dialog.showMessageBox(win, {
+        type: 'info',
+        title: 'streamlink installed!',
+        message: 'streamlink was installed successfully.',
+        detail: "ClipStream can now save clips. You're all set!",
+        buttons: ['Great!'],
+      });
+    }
+  });
+}
+
+function installStreamlinkWindows(win) {
+  const https = require('https');
+  const tmpDir = os.tmpdir();
+  const installerPath = path.join(tmpDir, 'streamlink-setup.exe');
+
+  const installWin = new BrowserWindow({
+    width: 500, height: 240,
+    resizable: false, minimizable: false, fullscreenable: false,
+    title: 'Installing streamlink…',
+    webPreferences: { nodeIntegration: false, contextIsolation: true },
+  });
+  installWin.loadURL('data:text/html,<html><body style="font-family:sans-serif;padding:24px;background:#111;color:#ccc"><h3 style="color:#a78bfa">Downloading streamlink…</h3><p>Fetching the official installer from streamlink.github.io</p><p style="color:#888;font-size:13px">This may take a moment. Please wait…</p></body></html>');
+
+  // Fetch the latest streamlink Windows installer URL from GitHub releases API
+  const options = {
+    hostname: 'api.github.com',
+    path: '/repos/streamlink/streamlink/releases/latest',
+    headers: { 'User-Agent': 'ClipStream-App' },
+  };
+
+  https.get(options, (res) => {
+    let data = '';
+    res.on('data', chunk => { data += chunk; });
+    res.on('end', () => {
+      try {
+        const release = JSON.parse(data);
+        const asset = release.assets.find(a => a.name.includes('windows') && a.name.endsWith('-setup.exe'));
+        if (!asset) throw new Error('No Windows installer found in release');
+
+        // Download the installer
+        const file = fs.createWriteStream(installerPath);
+        https.get(asset.browser_download_url, (dlRes) => {
+          // Follow redirect if needed
+          if (dlRes.statusCode === 302 || dlRes.statusCode === 301) {
+            https.get(dlRes.headers.location, (r2) => r2.pipe(file));
+          } else {
+            dlRes.pipe(file);
+          }
+          file.on('finish', () => {
+            file.close();
+            try { installWin.close(); } catch {}
+            // Run installer silently (/S = silent NSIS flag)
+            exec(`"${installerPath}" /S`, (exeErr) => {
+              if (exeErr) {
+                // Silent install failed — launch normally so user can click through
+                exec(`"${installerPath}"`);
+              }
+              dialog.showMessageBox(win, {
+                type: 'info',
+                title: 'streamlink installed!',
+                message: 'streamlink was installed successfully.',
+                detail: "Please restart ClipStream to start saving clips.",
+                buttons: ['Restart Now', 'Later'],
+                defaultId: 0,
+              }).then(({ response: r }) => {
+                if (r === 0) { app.relaunch(); app.exit(0); }
+              });
+            });
+          });
+        }).on('error', (e) => {
+          try { installWin.close(); } catch {}
+          fallbackToManual(win);
+        });
+      } catch (e) {
+        try { installWin.close(); } catch {}
+        fallbackToManual(win);
+      }
+    });
+  }).on('error', () => {
+    try { installWin.close(); } catch {}
+    fallbackToManual(win);
+  });
+}
+
+function fallbackToManual(win) {
+  dialog.showMessageBox(win, {
+    type: 'info',
+    title: 'Install streamlink manually',
+    message: 'Automatic install failed.',
+    detail: 'Please visit streamlink.github.io to download and install streamlink manually, then restart ClipStream.',
+    buttons: ['Open streamlink.github.io', 'OK'],
+    defaultId: 0,
+  }).then(({ response: r }) => {
+    if (r === 0) shell.openExternal('https://streamlink.github.io');
+  });
+}
 
 app.on('window-all-closed', () => {
   stopAllMonitors();
@@ -315,7 +480,7 @@ async function pollLiveStatus(session, streamUrl, settings) {
         status: 'live',
         isLive: true,
       });
-      notifyUser(`${session.streamer.displayName} is live!`, 'ClipForge started monitoring');
+      notifyUser(`${session.streamer.displayName} is live!`, 'ClipStream started monitoring');
     } else if (!isLive && session.isLive) {
       // Went offline
       session.isLive = false;
@@ -336,7 +501,7 @@ async function pollLiveStatus(session, streamUrl, settings) {
       });
     }
   } catch (err) {
-    console.error('[ClipForge] pollLiveStatus error:', err.message);
+    console.error('[ClipStream] pollLiveStatus error:', err.message);
     // Don't change isLive on unexpected errors — just show error badge
     session.status = 'error';
     sendToRenderer('monitor:update', {
@@ -406,14 +571,15 @@ async function checkIfLive(streamer) {
       // livestream field is null when offline, object when live
       return data.livestream !== null && data.livestream !== undefined;
     }
+
   } catch (err) {
-    console.error(`[ClipForge] checkIfLive error for ${streamer.platform}/${streamer.login}:`, err.message);
+    console.error(`[ClipStream] checkIfLive error for ${streamer.platform}/${streamer.login}:`, err.message);
     return null; // unknown — don't flip status
   }
   return null;
 }
 
-function startStreamCapture(session, streamUrl, settings) {
+async function startStreamCapture(session, streamUrl, settings) {
   // Use streamlink to pipe stream to ffmpeg for real-time audio analysis
   const streamlink = spawn('streamlink', [
     '--stdout',
@@ -422,13 +588,15 @@ function startStreamCapture(session, streamUrl, settings) {
     streamUrl,
     settings.quality || 'best',
   ]);
-
   session.streamlinkProcess = streamlink;
+  const streamSource = streamlink;
 
   // ebur128 outputs momentary loudness (M:) every ~0.1s — works on live streams
   // volumedetect only outputs at end-of-file so it never fires on live streams
-  const ffmpeg = spawn('ffmpeg', [
-    '-i', 'pipe:0',
+  const ffmpegInputArgs = ['-i', 'pipe:0'];
+
+  const ffmpeg = spawn(ffmpegPath, [
+    ...ffmpegInputArgs,
     '-af', 'ebur128=peak=true',
     '-vn',
     '-f', 'null',
@@ -436,28 +604,44 @@ function startStreamCapture(session, streamUrl, settings) {
   ]);
 
   session.ffmpegProcess = ffmpeg;
-  streamlink.stdout.pipe(ffmpeg.stdin);
+  if (streamSource) streamSource.stdout.pipe(ffmpeg.stdin);
 
-  // Suppress EPIPE on the pipe — happens when ffmpeg closes while streamlink
-  // is still writing (e.g. user stops the monitor mid-stream).
-  ffmpeg.stdin.on('error', (err) => {
-    if (err.code !== 'EPIPE') console.error('[ClipForge] ffmpeg stdin error:', err.message);
-  });
-  streamlink.stdout.on('error', (err) => {
-    if (err.code !== 'EPIPE') console.error('[ClipForge] streamlink stdout error:', err.message);
-  });
-
-  streamlink.on('error', (err) => {
-    if (err.code === 'ENOENT') {
-      console.error('[ClipForge] streamlink is not installed! Visit https://streamlink.github.io to install it.');
-      notifyUser('⚠️ ClipForge needs streamlink', 'Install streamlink from streamlink.github.io to enable monitoring');
-    } else {
-      console.error('[ClipForge] streamlink error:', err.message);
-    }
-  });
+  // Suppress EPIPE — happens when ffmpeg closes while streamlink is still writing
+  if (streamSource) {
+    ffmpeg.stdin.on('error', (err) => {
+      if (err.code !== 'EPIPE') console.error('[ClipStream] ffmpeg stdin error:', err.message);
+    });
+    streamSource.stdout.on('error', (err) => {
+      if (err.code !== 'EPIPE') console.error('[ClipStream] streamlink stdout error:', err.message);
+    });
+    streamSource.on('error', (err) => {
+      if (err.code === 'ENOENT') {
+        console.error('[ClipStream] streamlink is not installed! Visit https://streamlink.github.io to install it.');
+        notifyUser('⚠️ ClipStream needs streamlink', 'Install streamlink from streamlink.github.io to enable monitoring');
+      } else {
+        console.error('[ClipStream] streamlink error:', err.message);
+      }
+    });
+    streamSource.on('close', (code) => {
+      console.log(`[ClipStream] streamlink closed (code ${code}) for ${session.streamer.login}`);
+      if (activeMonitors.has(session.streamer.id) && session.isLive) {
+        session.status = 'reconnecting';
+        sendToRenderer('monitor:update', { id: session.streamer.id, status: 'reconnecting' });
+        session.reconnectTimeout = setTimeout(() => pollLiveStatus(session, streamUrl, settings), 10000);
+      }
+    });
+    streamSource.stderr.on('data', (d) => {
+      const t = d.toString();
+      console.log(`[streamlink] ${session.streamer.login}:`, t.trim().slice(0, 120));
+      if (t.includes('No playable streams') || t.includes('Unable to open URL')) {
+        session.status = 'error';
+        sendToRenderer('monitor:update', { id: session.streamer.id, status: 'error', isLive: session.isLive });
+      }
+    });
+  }
 
   ffmpeg.on('error', (err) => {
-    console.error('[ClipForge] ffmpeg analysis error:', err.message);
+    console.error('[ClipStream] ffmpeg analysis error:', err.message);
   });
 
   ffmpeg.stderr.on('data', (data) => {
@@ -466,9 +650,7 @@ function startStreamCapture(session, streamUrl, settings) {
     const match = text.match(/M:\s*(-?\d+\.?\d*)/);
     if (match) {
       session.audioLevel = parseFloat(match[1]);
-      // Record reading for rolling baseline (ignore near-silence to keep baseline meaningful)
       if (session.audioLevel > -50) pushReading(session.audioReadings, session.audioLevel);
-      // Update baseline every ~2 s worth of readings (~20 readings at ~10 Hz)
       if (session.audioReadings.length % 20 === 0) {
         session.audioBaseline = computeBaseline(session.audioReadings);
       }
@@ -482,26 +664,8 @@ function startStreamCapture(session, streamUrl, settings) {
     }
   });
 
-  streamlink.on('close', (code) => {
-    console.log(`[ClipForge] streamlink closed (code ${code}) for ${session.streamer.login}`);
-    if (activeMonitors.has(session.streamer.id) && session.isLive) {
-      session.status = 'reconnecting';
-      sendToRenderer('monitor:update', { id: session.streamer.id, status: 'reconnecting' });
-      session.reconnectTimeout = setTimeout(() => pollLiveStatus(session, streamUrl, settings), 10000);
-    }
-  });
-
-  streamlink.stderr.on('data', (d) => {
-    const t = d.toString();
-    console.log(`[streamlink] ${session.streamer.login}:`, t.trim().slice(0, 120));
-    if (t.includes('No playable streams') || t.includes('Unable to open URL')) {
-      session.status = 'error';
-      sendToRenderer('monitor:update', { id: session.streamer.id, status: 'error', isLive: session.isLive });
-    }
-  });
-
   ffmpeg.on('close', (code) => {
-    console.log(`[ClipForge] ffmpeg analysis closed (code ${code}) for ${session.streamer.login}`);
+    console.log(`[ClipStream] ffmpeg analysis closed (code ${code}) for ${session.streamer.login}`);
   });
 }
 
@@ -746,7 +910,7 @@ function checkForClipTrigger(session, settings) {
   if (shouldClip) {
     const reason = bothTriggered ? 'both' : extremeAudio ? 'extreme-audio' : extremeChat ? 'extreme-chat' : 'audio-only';
     console.log(
-      `[ClipForge] 🎬 Hype! ${session.streamer.displayName} ` +
+      `[ClipStream] 🎬 Hype! ${session.streamer.displayName} ` +
       `audio+${audioSpikeDb.toFixed(1)}dB (base ${audioBaseline.toFixed(1)}) ` +
       `chat×${chatMultiplier.toFixed(1)} (base ${chatBase.toFixed(0)}) ` +
       `score=${hypeScore.toFixed(2)} reason=${reason}`
@@ -765,17 +929,17 @@ async function captureClip(session, settings, hypeScore = 0.5) {
   const outputPath = path.join(outputDir, filename);
   const duration = settings.clipDuration || 60;
 
-  console.log(`[ClipForge] Starting clip capture → ${outputPath}`);
+  console.log(`[ClipStream] Starting clip capture → ${outputPath}`);
 
   // Helper: save clip data to store and notify renderer
   function finalizeClip() {
     try {
       const stat = fs.existsSync(outputPath) ? fs.statSync(outputPath) : null;
       if (!stat || stat.size < 50000) {
-        console.warn(`[ClipForge] Clip too small or missing (${stat?.size ?? 0} bytes), skipping`);
+        console.warn(`[ClipStream] Clip too small or missing (${stat?.size ?? 0} bytes), skipping`);
         return;
       }
-      console.log(`[ClipForge] Clip saved! ${(stat.size / 1024 / 1024).toFixed(1)} MB`);
+      console.log(`[ClipStream] Clip saved! ${(stat.size / 1024 / 1024).toFixed(1)} MB`);
       session.clipsCreated++;
 
       const clipData = {
@@ -806,7 +970,7 @@ async function captureClip(session, settings, hypeScore = 0.5) {
       sendToRenderer('monitor:update', { id: session.streamer.id, clipsCreated: session.clipsCreated });
       notifyUser('🎬 New clip saved!', `${session.streamer.displayName} · ${filename}`);
     } catch (e) {
-      console.error('[ClipForge] finalizeClip error:', e.message);
+      console.error('[ClipStream] finalizeClip error:', e.message);
     }
   }
 
@@ -831,9 +995,9 @@ async function captureClip(session, settings, hypeScore = 0.5) {
 
     sl.on('error', (err) => {
       if (err.code === 'ENOENT') {
-        console.warn('[ClipForge] streamlink not found — falling back to direct ffmpeg HLS');
+        console.warn('[ClipStream] streamlink not found — falling back to direct ffmpeg HLS');
       } else {
-        console.error('[ClipForge] streamlink error:', err.message);
+        console.error('[ClipStream] streamlink error:', err.message);
       }
       try { ff.kill(); } catch {}
       resolve(false);
@@ -843,10 +1007,10 @@ async function captureClip(session, settings, hypeScore = 0.5) {
 
     // Suppress EPIPE — expected when ffmpeg finishes and stdin closes
     ff.stdin.on('error', (err) => {
-      if (err.code !== 'EPIPE') console.error('[ClipForge] clip ffmpeg stdin error:', err.message);
+      if (err.code !== 'EPIPE') console.error('[ClipStream] clip ffmpeg stdin error:', err.message);
     });
     sl.stdout.on('error', (err) => {
-      if (err.code !== 'EPIPE') console.error('[ClipForge] clip streamlink stdout error:', err.message);
+      if (err.code !== 'EPIPE') console.error('[ClipStream] clip streamlink stdout error:', err.message);
     });
 
     // When streamlink stderr says it opened successfully, mark as started
@@ -856,7 +1020,7 @@ async function captureClip(session, settings, hypeScore = 0.5) {
     });
 
     ff.on('error', (err) => {
-      console.error('[ClipForge] ffmpeg clip error:', err.message);
+      console.error('[ClipStream] ffmpeg clip error:', err.message);
       try { sl.kill(); } catch {}
       resolve(false);
     });
@@ -879,10 +1043,11 @@ async function captureClip(session, settings, hypeScore = 0.5) {
 
   // ── Fallback: direct ffmpeg HLS (no streamlink needed) ───────────────────
   if (!streamlinkWorked) {
-    console.log('[ClipForge] Attempting direct HLS capture via ffmpeg...');
+    console.log('[ClipStream] Attempting direct HLS capture via ffmpeg...');
+
+    let hlsUrl = null;
 
     // For Kick, fetch the HLS URL from the API
-    let hlsUrl = null;
     if (session.streamer.platform === 'kick') {
       try {
         const res = await net.fetch(`https://kick.com/api/v2/channels/${encodeURIComponent(session.streamer.login)}`, {
@@ -893,13 +1058,13 @@ async function captureClip(session, settings, hypeScore = 0.5) {
           hlsUrl = data.playback_url || data.livestream?.playback_url;
         }
       } catch (e) {
-        console.error('[ClipForge] Failed to get Kick HLS URL:', e.message);
+        console.error('[ClipStream] Failed to get Kick HLS URL:', e.message);
       }
     }
 
     if (hlsUrl) {
       await new Promise((resolve) => {
-        const ff = spawn('ffmpeg', [
+        const ff = spawn(ffmpegPath, [
           '-y',
           '-i', hlsUrl,
           '-t', String(duration),
@@ -912,7 +1077,7 @@ async function captureClip(session, settings, hypeScore = 0.5) {
         ]);
 
         ff.on('error', (err) => {
-          console.error('[ClipForge] ffmpeg HLS error:', err.message);
+          console.error('[ClipStream] ffmpeg HLS error:', err.message);
           resolve();
         });
 
@@ -924,8 +1089,8 @@ async function captureClip(session, settings, hypeScore = 0.5) {
         setTimeout(() => { try { ff.kill('SIGTERM'); } catch {} }, (duration + 10) * 1000);
       });
     } else {
-      console.error('[ClipForge] No HLS URL available and streamlink not found. Install streamlink: https://streamlink.github.io');
-      notifyUser('⚠️ ClipForge', 'Could not capture clip. Install streamlink from streamlink.github.io');
+      console.error('[ClipStream] No HLS URL available and streamlink not found. Install streamlink: https://streamlink.github.io');
+      notifyUser('⚠️ ClipStream', 'Could not capture clip. Install streamlink from streamlink.github.io');
     }
   }
 }
@@ -934,7 +1099,7 @@ function generateThumbnail(videoPath, clipData) {
   // Store thumbnails in app userData — NOT in the user's clips folder
   const thumbFilename = `${clipData.id}.jpg`;
   const thumbPath = path.join(thumbnailsDir(), thumbFilename);
-  exec(`ffmpeg -i "${videoPath}" -ss 00:00:02 -vframes 1 -q:v 2 "${thumbPath}" -y`, (err) => {
+  exec(`"${ffmpegPath}" -i "${videoPath}" -ss 00:00:02 -vframes 1 -q:v 2 "${thumbPath}" -y`, (err) => {
     if (!err && fs.existsSync(thumbPath)) {
       const clips = store.get('recentClips', []);
       const idx = clips.findIndex(c => c.id === clipData.id);
@@ -1230,8 +1395,8 @@ async function sendReceiptEmail(email, amount, nextBillingDate, isRenewal = fals
     });
 
     const subject = isRenewal
-      ? '🎬 ClipForge — Monthly Renewal Confirmed'
-      : '🎬 ClipForge — Welcome! Your Subscription Receipt';
+      ? '🎬 ClipStream — Monthly Renewal Confirmed'
+      : '🎬 ClipStream — Welcome! Your Subscription Receipt';
 
     const html = `
       <!DOCTYPE html>
@@ -1264,15 +1429,15 @@ async function sendReceiptEmail(email, amount, nextBillingDate, isRenewal = fals
             <p class="logo">Clip<span>Forge</span></p>
           </div>
           <div class="body">
-            <h2>${isRenewal ? 'Subscription Renewed' : 'Welcome to ClipForge Pro!'}</h2>
+            <h2>${isRenewal ? 'Subscription Renewed' : 'Welcome to ClipStream Pro!'}</h2>
             <p>${isRenewal
-              ? 'Your ClipForge Pro subscription has been automatically renewed. Here is your receipt.'
-              : 'Thank you for subscribing to ClipForge Pro! Your account is now active. Here is your receipt.'}</p>
+              ? 'Your ClipStream Pro subscription has been automatically renewed. Here is your receipt.'
+              : 'Thank you for subscribing to ClipStream Pro! Your account is now active. Here is your receipt.'}</p>
 
             <div>
               <div class="receipt-row">
                 <span class="receipt-label">Plan</span>
-                <span class="receipt-value">ClipForge Pro — Monthly</span>
+                <span class="receipt-value">ClipStream Pro — Monthly</span>
               </div>
               <div class="receipt-row">
                 <span class="receipt-label">Billed to</span>
@@ -1293,10 +1458,10 @@ async function sendReceiptEmail(email, amount, nextBillingDate, isRenewal = fals
               <span class="total-value">$${amount}</span>
             </div>
 
-            <p style="font-size:12px; color:#4a4a6a;">To cancel or manage your subscription, open ClipForge and go to Settings. Questions? Reply to this email.</p>
+            <p style="font-size:12px; color:#4a4a6a;">To cancel or manage your subscription, open ClipStream and go to Settings. Questions? Reply to this email.</p>
           </div>
           <div class="footer">
-            <p>© ${new Date().getFullYear()} ClipForge · You're receiving this because you subscribed at ${email}</p>
+            <p>© ${new Date().getFullYear()} ClipStream · You're receiving this because you subscribed at ${email}</p>
           </div>
         </div>
       </body>
@@ -1304,14 +1469,14 @@ async function sendReceiptEmail(email, amount, nextBillingDate, isRenewal = fals
     `;
 
     await transporter.sendMail({
-      from: `"${smtp.fromName || 'ClipForge'}" <${smtp.user}>`,
+      from: `"${smtp.fromName || 'ClipStream'}" <${smtp.user}>`,
       to: email,
       subject,
       html,
     });
-    console.log('[ClipForge] Receipt email sent to', email);
+    console.log('[ClipStream] Receipt email sent to', email);
   } catch (err) {
-    console.error('[ClipForge] Email send error:', err.message);
+    console.error('[ClipStream] Email send error:', err.message);
   }
 }
 

@@ -123,7 +123,7 @@ export default function SubscriptionGate({ onSubscribe, onGoToSignIn }) {
                 </defs>
               </svg>
             </div>
-            <h1 className="sub-hero-title">ClipForge Pro</h1>
+            <h1 className="sub-hero-title">ClipStream Pro</h1>
             <p className="sub-hero-subtitle">The only fully automatic AI stream clipper on the market</p>
           </div>
 
@@ -161,7 +161,7 @@ export default function SubscriptionGate({ onSubscribe, onGoToSignIn }) {
 
           <div className="social-proof">
             <div className="testimonial">
-              <p className="testimonial-text">"ClipForge caught moments I would've completely missed. It's a game changer for content creators."</p>
+              <p className="testimonial-text">"ClipStream caught moments I would've completely missed. It's a game changer for content creators."</p>
               <p className="testimonial-author">— @xample_streamer, 50K followers</p>
             </div>
           </div>
@@ -190,7 +190,7 @@ export default function SubscriptionGate({ onSubscribe, onGoToSignIn }) {
                 </span>
               </>
             ) : (
-              <span className="checkout-subtitle">ClipForge Pro · $49.99/month</span>
+              <span className="checkout-subtitle">ClipStream Pro · $49.99/month</span>
             )}
           </div>
 
