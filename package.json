@@ -1,6 +1,6 @@
 {
   "name": "clipstream",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "description": "AI-powered automatic stream clipper for Twitch, YouTube, and Kick",
   "author": "Ahmad Othman",
   "main": "main.js",
@@ -52,11 +52,15 @@
       "target": [
         {
           "target": "dmg",
-          "arch": ["arm64"]
+          "arch": [
+            "arm64"
+          ]
         },
         {
           "target": "zip",
-          "arch": ["arm64"]
+          "arch": [
+            "arm64"
+          ]
         }
       ]
     },
