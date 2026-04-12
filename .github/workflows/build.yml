@@ -2,63 +2,37 @@ name: Build ClipStream
 
 on:
   push:
-    branches: [main]
+    tags:
+      - 'v*'
   workflow_dispatch:
 
+permissions:
+  contents: write
+
 jobs:
-  # ── Mac Build ──────────────────────────────────────────────────────────────
   build-mac:
     runs-on: macos-latest
     steps:
-      - name: Checkout code
-        uses: actions/checkout@v4
-
-      - name: Setup Node.js
-        uses: actions/setup-node@v4
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
         with:
           node-version: 20
           cache: 'npm'
-
-      - name: Install dependencies
-        run: npm install
-
-      - name: Build Mac app
-        run: npx vite build && npx electron-builder --mac dmg --arm64
+      - run: npm install
+      - run: npx vite build && npx electron-builder --mac --publish always
         env:
           CSC_IDENTITY_AUTO_DISCOVERY: false
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Upload Mac DMG
-        uses: actions/upload-artifact@v4
-        with:
-          name: ClipStream-Mac
-          path: dist-electron/*.dmg
-          retention-days: 30
-
-  # ── Windows Build ──────────────────────────────────────────────────────────
   build-windows:
     runs-on: windows-latest
     steps:
-      - name: Checkout code
-        uses: actions/checkout@v4
-
-      - name: Setup Node.js
-        uses: actions/setup-node@v4
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
         with:
           node-version: 20
           cache: 'npm'
-
-      - name: Install dependencies
-        run: npm install
-
-      - name: Build Windows app
-        run: npx vite build && npx electron-builder --win nsis
+      - run: npm install
+      - run: npx vite build && npx electron-builder --win --publish always
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-
-      - name: Upload Windows installer
-        uses: actions/upload-artifact@v4
-        with:
-          name: ClipStream-Windows
-          path: dist-electron/*.exe
-          retention-days: 30

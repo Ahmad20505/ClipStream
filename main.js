@@ -7,6 +7,42 @@ const os = require('os');
 // ─── Bundled ffmpeg binary (no install needed) ───────────────────────────────
 const ffmpegPath = require('ffmpeg-static');
 
+// ─── Auto Updater ────────────────────────────────────────────────────────────
+const { autoUpdater } = require('electron-updater');
+
+function initAutoUpdater() {
+  if (!app.isPackaged) return; // skip in dev mode
+
+  autoUpdater.autoDownload = true;
+  autoUpdater.autoInstallOnAppQuit = true;
+
+  autoUpdater.on('update-available', (info) => {
+    console.log(`[ClipStream] Update available: v${info.version}`);
+    sendToRenderer('update:available', { version: info.version });
+  });
+
+  autoUpdater.on('update-downloaded', (info) => {
+    dialog.showMessageBox(mainWindow, {
+      type: 'info',
+      title: '🎉 Update Ready to Install',
+      message: `ClipStream v${info.version} has been downloaded.`,
+      detail: 'Restart ClipStream to apply the update. Your settings and clips will be preserved.',
+      buttons: ['Restart & Update', 'Later'],
+      defaultId: 0,
+    }).then(({ response }) => {
+      if (response === 0) autoUpdater.quitAndInstall();
+    });
+  });
+
+  autoUpdater.on('error', (err) => {
+    console.error('[ClipStream] Auto-updater error:', err.message);
+  });
+
+  // Check 5s after launch, then every 4 hours
+  setTimeout(() => autoUpdater.checkForUpdatesAndNotify(), 5000);
+  setInterval(() => autoUpdater.checkForUpdatesAndNotify(), 4 * 60 * 60 * 1000);
+}
+
 // ─── Global EPIPE / uncaught-exception safety net ───────────────────────────
 // EPIPE (broken pipe) fires when one side of a pipe (streamlink → ffmpeg)
 // closes while the other is still writing. This is expected behaviour when
@@ -97,6 +133,7 @@ app.whenReady().then(async () => {
   createWindow();
   scheduleRenewalCheck();
   checkStreamlinkInstalled();
+  initAutoUpdater();
   app.on('activate', () => {
     if (BrowserWindow.getAllWindows().length === 0) createWindow();
   });

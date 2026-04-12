@@ -39,6 +39,11 @@
       "!node_modules/@vitejs/**/*",
       "!node_modules/concurrently/**/*"
     ],
+    "publish": {
+      "provider": "github",
+      "owner": "Ahmad20505",
+      "repo": "ClipStream"
+    },
     "mac": {
       "category": "public.app-category.utilities",
       "icon": "assets/icon.icns",
@@ -47,17 +52,11 @@
       "target": [
         {
           "target": "dmg",
-          "arch": [
-            "x64",
-            "arm64"
-          ]
+          "arch": ["arm64"]
         },
         {
           "target": "zip",
-          "arch": [
-            "x64",
-            "arm64"
-          ]
+          "arch": ["arm64"]
         }
       ]
     },
