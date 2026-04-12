@@ -178,76 +178,63 @@ function installStreamlinkMac(win) {
 }
 
 function installStreamlinkWindows(win) {
-  const https = require('https');
-  const tmpDir = os.tmpdir();
-  const installerPath = path.join(tmpDir, 'streamlink-setup.exe');
-
   const installWin = new BrowserWindow({
     width: 500, height: 240,
     resizable: false, minimizable: false, fullscreenable: false,
     title: 'Installing streamlink…',
     webPreferences: { nodeIntegration: false, contextIsolation: true },
   });
-  installWin.loadURL('data:text/html,<html><body style="font-family:sans-serif;padding:24px;background:#111;color:#ccc"><h3 style="color:#a78bfa">Downloading streamlink…</h3><p>Fetching the official installer from streamlink.github.io</p><p style="color:#888;font-size:13px">This may take a moment. Please wait…</p></body></html>');
+  installWin.loadURL('data:text/html,<html><body style="font-family:sans-serif;padding:24px;background:#111;color:#ccc"><h3 style="color:#a78bfa">Installing streamlink…</h3><p>Using Windows Package Manager (winget)</p><p style="color:#888;font-size:13px">This may take a minute. Please wait…</p></body></html>');
 
-  // Fetch the latest streamlink Windows installer URL from GitHub releases API
-  const options = {
-    hostname: 'api.github.com',
-    path: '/repos/streamlink/streamlink/releases/latest',
-    headers: { 'User-Agent': 'ClipStream-App' },
-  };
-
-  https.get(options, (res) => {
-    let data = '';
-    res.on('data', chunk => { data += chunk; });
-    res.on('end', () => {
-      try {
-        const release = JSON.parse(data);
-        const asset = release.assets.find(a => a.name.includes('windows') && a.name.endsWith('-setup.exe'));
-        if (!asset) throw new Error('No Windows installer found in release');
-
-        // Download the installer
-        const file = fs.createWriteStream(installerPath);
-        https.get(asset.browser_download_url, (dlRes) => {
-          // Follow redirect if needed
-          if (dlRes.statusCode === 302 || dlRes.statusCode === 301) {
-            https.get(dlRes.headers.location, (r2) => r2.pipe(file));
-          } else {
-            dlRes.pipe(file);
-          }
-          file.on('finish', () => {
-            file.close();
-            try { installWin.close(); } catch {}
-            // Run installer silently (/S = silent NSIS flag)
-            exec(`"${installerPath}" /S`, (exeErr) => {
-              if (exeErr) {
-                // Silent install failed — launch normally so user can click through
-                exec(`"${installerPath}"`);
-              }
-              dialog.showMessageBox(win, {
-                type: 'info',
-                title: 'streamlink installed!',
-                message: 'streamlink was installed successfully.',
-                detail: "Please restart ClipStream to start saving clips.",
-                buttons: ['Restart Now', 'Later'],
-                defaultId: 0,
-              }).then(({ response: r }) => {
-                if (r === 0) { app.relaunch(); app.exit(0); }
-              });
-            });
-          });
-        }).on('error', (e) => {
-          try { installWin.close(); } catch {}
-          fallbackToManual(win);
-        });
-      } catch (e) {
+  // Method 1: winget — built into Windows 10/11, most reliable
+  exec('winget install streamlink.streamlink --accept-package-agreements --accept-source-agreements --silent',
+    { timeout: 120000 },
+    (wingetErr) => {
+      if (!wingetErr) {
         try { installWin.close(); } catch {}
-        fallbackToManual(win);
+        showStreamlinkSuccessWindows(win);
+        return;
       }
-    });
-  }).on('error', () => {
-    try { installWin.close(); } catch {}
-    fallbackToManual(win);
+
+      // Method 2: PowerShell download — handles all redirects natively
+      installWin.loadURL('data:text/html,<html><body style="font-family:sans-serif;padding:24px;background:#111;color:#ccc"><h3 style="color:#a78bfa">Downloading streamlink…</h3><p>Fetching installer via PowerShell</p><p style="color:#888;font-size:13px">This may take a minute. Please wait…</p></body></html>');
+
+      const psScript = [
+        '$ErrorActionPreference = "Stop"',
+        '$headers = @{ "User-Agent" = "ClipStream-App" }',
+        '$release = Invoke-RestMethod "https://api.github.com/repos/streamlink/streamlink/releases/latest" -Headers $headers',
+        '$asset = $release.assets | Where-Object { $_.name -match "windows" -and $_.name -match "setup\\.exe" } | Select-Object -First 1',
+        'if (-not $asset) { throw "No installer found" }',
+        '$out = Join-Path $env:TEMP "streamlink-setup.exe"',
+        'Invoke-WebRequest -Uri $asset.browser_download_url -OutFile $out -UseBasicParsing',
+        'Start-Process -FilePath $out -ArgumentList "/S" -Wait',
+      ].join('; ');
+
+      exec(`powershell -NoProfile -ExecutionPolicy Bypass -Command "${psScript}"`,
+        { timeout: 300000 },
+        (psErr) => {
+          try { installWin.close(); } catch {}
+          if (!psErr) {
+            showStreamlinkSuccessWindows(win);
+          } else {
+            fallbackToManual(win);
+          }
+        }
+      );
+    }
+  );
+}
+
+function showStreamlinkSuccessWindows(win) {
+  dialog.showMessageBox(win, {
+    type: 'info',
+    title: 'streamlink installed!',
+    message: 'streamlink was installed successfully.',
+    detail: 'Please restart ClipStream to start saving clips.',
+    buttons: ['Restart Now', 'Later'],
+    defaultId: 0,
+  }).then(({ response: r }) => {
+    if (r === 0) { app.relaunch(); app.exit(0); }
   });
 }
 
