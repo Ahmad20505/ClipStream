@@ -39,8 +39,7 @@
       "provider": "github",
       "owner": "Ahmad20505",
       "repo": "ClipStream",
-      "draft": false,
-      "releaseType": "release"
+      "draft": false
     },
     "mac": {
       "category": "public.app-category.utilities",
