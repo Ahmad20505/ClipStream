@@ -19,10 +19,12 @@ jobs:
           node-version: 20
           cache: 'npm'
       - run: npm install
-      - run: npx vite build && npx electron-builder --mac --publish always
+      - name: Build and publish Mac
+        run: npx vite build && npx electron-builder --mac --publish always
         env:
           CSC_IDENTITY_AUTO_DISCOVERY: false
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          EP_DRAFT: false
 
   build-windows:
     runs-on: windows-latest
@@ -33,6 +35,8 @@ jobs:
           node-version: 20
           cache: 'npm'
       - run: npm install
-      - run: npx vite build && npx electron-builder --win --publish always
+      - name: Build and publish Windows
+        run: npx vite build && npx electron-builder --win --publish always
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          EP_DRAFT: false
