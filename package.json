@@ -1,6 +1,6 @@
 {
   "name": "clipstream",
-  "version": "1.0.3",
+  "version": "1.0.5",
   "description": "AI-powered automatic stream clipper for Twitch, YouTube, and Kick",
   "author": "Ahmad Othman",
   "main": "main.js",
@@ -19,7 +19,10 @@
     "appId": "com.clipstream.app",
     "productName": "ClipStream",
     "copyright": "Copyright © 2026 ClipStream",
-    "asar": false,
+    "asar": true,
+    "asarUnpack": [
+      "node_modules/ffmpeg-static/**"
+    ],
     "directories": {
       "output": "dist-electron",
       "buildResources": "assets"
@@ -30,14 +33,7 @@
       "preload.js",
       "assets/icon.png",
       "assets/icon.ico",
-      "assets/icon.icns",
-      "node_modules/**/*",
-      "!node_modules/.bin",
-      "!node_modules/electron/**/*",
-      "!node_modules/electron-builder/**/*",
-      "!node_modules/vite/**/*",
-      "!node_modules/@vitejs/**/*",
-      "!node_modules/concurrently/**/*"
+      "assets/icon.icns"
     ],
     "publish": {
       "provider": "github",

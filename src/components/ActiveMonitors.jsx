@@ -32,6 +32,20 @@ function ChatMeter({ rate, threshold = 15 }) {
 function MonitorCard({ monitor, onStop }) {
   const [metrics, setMetrics] = useState({ audioLevel: monitor.audioLevel || -60, chatRate: monitor.chatRate || 0 });
   const [stopping, setStopping] = useState(false);
+  const [showSensitivity, setShowSensitivity] = useState(false);
+  const [localSensitivity, setLocalSensitivity] = useState(null);
+
+  // Load per-streamer sensitivity on mount
+  useEffect(() => {
+    api.streamerSettings?.get(monitor.id).then(s => {
+      if (s?.sensitivity != null) setLocalSensitivity(s.sensitivity);
+    }).catch(() => {});
+  }, [monitor.id]);
+
+  const saveSensitivity = async (val) => {
+    setLocalSensitivity(val);
+    await api.streamerSettings?.set(monitor.id, { sensitivity: val });
+  };
 
   useEffect(() => {
     const off = api.monitor.onMetrics((data) => {
@@ -112,6 +126,43 @@ function MonitorCard({ monitor, onStop }) {
           )}
         </button>
       </div>
+
+      {/* Per-streamer sensitivity */}
+      <div style={{ padding: '10px 16px', borderBottom: '1px solid rgba(255,255,255,0.05)', display: 'flex', alignItems: 'center', gap: 10 }}>
+        <button
+          onClick={() => setShowSensitivity(s => !s)}
+          style={{ fontSize: 11, color: localSensitivity != null ? '#a78bfa' : 'var(--text-muted)', background: 'none', border: 'none', cursor: 'pointer', padding: 0, fontFamily: 'var(--font-body)', fontWeight: 600 }}
+        >
+          {localSensitivity != null ? `🎯 Custom sensitivity: ${localSensitivity}%` : '🎯 Use global sensitivity'} {showSensitivity ? '▲' : '▼'}
+        </button>
+        {localSensitivity != null && (
+          <button onClick={() => saveSensitivity(null)} style={{ fontSize: 10, color: '#6b7280', background: 'none', border: 'none', cursor: 'pointer', padding: 0 }}>reset</button>
+        )}
+      </div>
+      {showSensitivity && (
+        <div style={{ padding: '12px 16px', borderBottom: '1px solid rgba(255,255,255,0.05)' }}>
+          <div style={{ fontSize: 11, color: 'var(--text-muted)', marginBottom: 8 }}>Override clip sensitivity for just this streamer:</div>
+          <div style={{ display: 'flex', gap: 8 }}>
+            {[
+              { label: '🎯 Conservative', val: 20 },
+              { label: '⚖️ Balanced', val: 45 },
+              { label: '🔥 Aggressive', val: 70 },
+            ].map(p => (
+              <button key={p.val} onClick={() => saveSensitivity(p.val)} style={{
+                flex: 1, padding: '7px 8px', borderRadius: 7, cursor: 'pointer', fontSize: 11, fontWeight: 700, fontFamily: 'var(--font-body)',
+                background: localSensitivity === p.val ? 'rgba(124,58,237,0.2)' : 'rgba(255,255,255,0.04)',
+                border: `1px solid ${localSensitivity === p.val ? 'rgba(124,58,237,0.4)' : 'rgba(255,255,255,0.08)'}`,
+                color: localSensitivity === p.val ? '#a78bfa' : 'var(--text-secondary)',
+              }}>{p.label}</button>
+            ))}
+          </div>
+          <input type="range" min={0} max={100} step={5} value={localSensitivity ?? 50}
+            onChange={e => saveSensitivity(Number(e.target.value))}
+            style={{ width: '100%', marginTop: 10, accentColor: '#7c3aed' }}
+          />
+          <div style={{ textAlign: 'center', fontSize: 11, color: '#a78bfa', marginTop: 4 }}>{localSensitivity ?? 50}%</div>
+        </div>
+      )}
 
       {/* Metrics */}
       <div className="monitor-metrics">

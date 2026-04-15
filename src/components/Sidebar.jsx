@@ -49,6 +49,16 @@ const NAV_ITEMS = [
     ),
   },
   {
+    id: 'guide',
+    label: 'Guide',
+    icon: (
+      <svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+        <path d="M2 3h6a4 4 0 0 1 4 4v14a3 3 0 0 0-3-3H2z" />
+        <path d="M22 3h-6a4 4 0 0 0-4 4v14a3 3 0 0 1 3-3h7z" />
+      </svg>
+    ),
+  },
+  {
     id: 'help',
     label: 'Help',
     icon: (
@@ -70,6 +80,7 @@ const PLATFORM_CONFIG = [
 export default function Sidebar({ page, onNavigate, monitorCount, clips = [] }) {
   const liveCount    = monitorCount;
   const clipsToday   = clips.filter(c => c.createdAt >= new Date().setHours(0,0,0,0)).length;
+  const pendingReview = clips.filter(c => c.staged).length;
 
   return (
     <aside className="sidebar">
@@ -134,7 +145,12 @@ export default function Sidebar({ page, onNavigate, monitorCount, clips = [] }) 
               {item.badge && monitorCount > 0 && (
                 <span className="sidebar-badge">{monitorCount}</span>
               )}
-              {item.clipBadge && clipsToday > 0 && (
+              {item.clipBadge && pendingReview > 0 && (
+                <span className="sidebar-badge" style={{ background: 'rgba(124,58,237,0.85)', color: 'white', borderColor: 'rgba(124,58,237,0.5)', animation: 'status-pulse 2s ease-in-out infinite' }}>
+                  {pendingReview}
+                </span>
+              )}
+              {item.clipBadge && pendingReview === 0 && clipsToday > 0 && (
                 <span className="sidebar-badge" style={{ background: 'rgba(124,58,237,0.2)', color: '#a78bfa', borderColor: 'rgba(124,58,237,0.3)' }}>
                   {clipsToday}
                 </span>

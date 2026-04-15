@@ -5,8 +5,9 @@ import Dashboard from './components/Dashboard.jsx';
 import StreamerSearch from './components/StreamerSearch.jsx';
 import ActiveMonitors from './components/ActiveMonitors.jsx';
 import ClipGallery from './components/ClipGallery.jsx';
+import StreamTimeline from './components/StreamTimeline.jsx';
 import Help from './components/Help';
-import TutorialOverlay from './components/TutorialOverlay';
+import Guide from './components/Guide.jsx';
 import Settings from './components/Settings.jsx';
 import SubscriptionGate from './components/SubscriptionGate.jsx';
 import SignIn from './components/SignIn.jsx';
@@ -15,7 +16,7 @@ const api = window.clipforge;
 
 export default function App() {
   const [page, setPage] = useState('dashboard');
-  const [showTutorial, setShowTutorial] = useState(() => !localStorage.getItem('cs_tutorial_done'));
+  // Tutorial overlay removed — Guide page in sidebar is always accessible
   const [subscription, setSubscription] = useState(null);
   const [monitors, setMonitors] = useState([]);
   const [clips, setClips] = useState([]);
@@ -24,6 +25,12 @@ export default function App() {
   const [toast, setToast] = useState(null);
   // Auth state: null = unknown, 'signed-in', 'signed-out', 'no-account'
   const [authState, setAuthState] = useState(null);
+
+  // ── Tray navigation from main process ─────────────────────────────────────
+  useEffect(() => {
+    const unsub = api.onNavigate?.(setPage);
+    return () => unsub?.();
+  }, []);
 
   // ── Init ──────────────────────────────────────────────────────────────────
   useEffect(() => {
@@ -72,12 +79,21 @@ export default function App() {
     });
     const offCreate = api.clips.onCreate((clip) => {
       setClips(prev => [clip, ...prev]);
-      showToast(`🎬 Clip saved: ${clip.filename}`, 'success');
+      const clipTime = new Date(clip.createdAt).toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' });
+      showToast(`🎬 New clip from ${clip.streamerName} at ${clipTime}`, 'success');
     });
     const offThumb = api.clips.onThumbnail(({ id, thumbnail }) => {
       setClips(prev => prev.map(c => c.id === id ? { ...c, thumbnail } : c));
     });
-    return () => { offUpdate?.(); offCreate?.(); offThumb?.(); };
+    // Sync rating changes, saves, and any other clip updates back to app state
+    const offClipUpdate = api.clips.onUpdate?.((updated) => {
+      setClips(prev => prev.map(c => c.id === updated.id ? { ...c, ...updated } : c));
+    });
+    // Sync auto-cleanup removals
+    const offRefresh = api.clips.onRefresh?.((refreshed) => {
+      setClips(refreshed);
+    });
+    return () => { offUpdate?.(); offCreate?.(); offThumb?.(); offClipUpdate?.(); offRefresh?.(); };
   }, [authState]);
 
   // ── Helpers ───────────────────────────────────────────────────────────────
@@ -227,10 +243,14 @@ export default function App() {
       case 'monitors':
         return <ActiveMonitors monitors={monitors} onStop={handleStopMonitor} onNavigate={setPage} />;
       case 'clips':
-        return <ClipGallery clips={clips} onDelete={handleDeleteClip} onOpenFolder={() => api.clips.openFolder()} />;
+        return <ClipGallery clips={clips} onDelete={handleDeleteClip} onOpenFolder={() => api.clips.openFolder()} onNavigate={setPage} />;
+      case 'timeline':
+        return <StreamTimeline clips={clips} onWatchClip={(clip) => setPage('clips')} onNavigate={setPage} />;
+      case 'guide':
+        return <Guide />;
       case 'help':
-      return <Help />;
-    case 'settings':
+        return <Help />;
+      case 'settings':
         return <Settings settings={settings} onSave={handleSaveSettings} subscription={subscription} onLogout={handleLogout} />;
       default:
         return <Dashboard monitors={monitors} clips={clips} onNavigate={setPage} />;
@@ -248,9 +268,6 @@ export default function App() {
           </div>
         </main>
       </div>
-      {showTutorial && (
-        <TutorialOverlay onComplete={() => { setShowTutorial(false); localStorage.setItem('cs_tutorial_done', '1'); }} />
-      )}
       {toast && (
         <div className={`toast toast-${toast.type}`} key={toast.id}>
           <span className="toast-icon">

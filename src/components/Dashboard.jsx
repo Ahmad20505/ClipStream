@@ -2,12 +2,25 @@ import { useMemo } from 'react';
 
 const platformColor = { twitch: '#9146ff', youtube: '#ff0000', kick: '#53fc18' };
 
+const toClipUrl = (filePath) => {
+  if (!filePath) return '';
+  return 'file://' + filePath.split('/').map(seg => encodeURIComponent(seg)).join('/');
+};
+
 function timeAgo(ts) {
   const s = Math.floor((Date.now() - ts) / 1000);
   if (s < 60) return `${s}s ago`;
   if (s < 3600) return `${Math.floor(s / 60)}m ago`;
   if (s < 86400) return `${Math.floor(s / 3600)}h ago`;
   return `${Math.floor(s / 86400)}d ago`;
+}
+
+function friendlyClipName(createdAt) {
+  const d = new Date(createdAt);
+  const month = d.toLocaleString('en-US', { month: 'short' });
+  const day   = d.getDate();
+  const time  = d.toLocaleString('en-US', { hour: 'numeric', minute: '2-digit', hour12: true });
+  return `${month} ${day} · ${time}`;
 }
 
 // ── Stat Card ──────────────────────────────────────────────────────────────────
@@ -141,7 +154,7 @@ function ClipRow({ clip }) {
         position: 'relative',
       }}>
         {clip.thumbnail
-          ? <img src={`file://${clip.thumbnail}`} alt="" style={{ width: '100%', height: '100%', objectFit: 'cover' }} />
+          ? <img src={toClipUrl(clip.thumbnail)} alt="" style={{ width: '100%', height: '100%', objectFit: 'cover' }} />
           : <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5" opacity="0.35"><polygon points="5 3 19 12 5 21 5 3" /></svg>}
         <div style={{ position: 'absolute', bottom: 2, left: 2, width: 5, height: 5, borderRadius: '50%', background: pc }} />
       </div>
@@ -152,7 +165,7 @@ function ClipRow({ clip }) {
           {clip.streamerName}
         </p>
         <p style={{ fontSize: 11, color: 'var(--text-muted)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', marginTop: 1 }}>
-          {clip.filename}
+          {friendlyClipName(clip.createdAt)}
         </p>
       </div>
 
@@ -206,7 +219,20 @@ export default function Dashboard({ monitors, clips, onNavigate }) {
     const todayClips  = clips.filter(c => c.createdAt >= today).length;
     const streamers   = new Set(monitors.map(m => m.id)).size;
     const totalClips  = clips.length;
-    return { liveCount, totalClips, todayClips, streamers };
+    const bestClip    = clips.length ? clips.reduce((a, b) => (b.hypeScore ?? 0) > (a.hypeScore ?? 0) ? b : a) : null;
+    const pendingReview = clips.filter(c => c.staged).length;
+
+    // Streamer leaderboard — clips per streamer
+    const leaderboard = Object.values(
+      clips.reduce((acc, c) => {
+        if (!acc[c.streamerName]) acc[c.streamerName] = { name: c.streamerName, platform: c.platform, count: 0, bestScore: 0 };
+        acc[c.streamerName].count++;
+        if ((c.hypeScore ?? 0) > acc[c.streamerName].bestScore) acc[c.streamerName].bestScore = c.hypeScore ?? 0;
+        return acc;
+      }, {})
+    ).sort((a, b) => b.count - a.count).slice(0, 5);
+
+    return { liveCount, totalClips, todayClips, streamers, bestClip, leaderboard, pendingReview };
   }, [monitors, clips]);
 
   const isFirstTime = monitors.length === 0 && clips.length === 0;
@@ -293,7 +319,7 @@ export default function Dashboard({ monitors, clips, onNavigate }) {
       </div>
 
       {/* ── Content panels */}
-      <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 16, marginBottom: 20 }}>
+      <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 16, marginBottom: 16 }}>
         {/* Monitors panel */}
         <Panel title="Active Monitors" action={monitors.length > 0 ? 'View all' : null} onAction={() => onNavigate('monitors')}>
           {monitors.length === 0 ? (
@@ -322,6 +348,74 @@ export default function Dashboard({ monitors, clips, onNavigate }) {
           )}
         </Panel>
       </div>
+
+      {/* ── Best clip + leaderboard */}
+      {clips.length > 0 && (
+        <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 16, marginBottom: 16 }}>
+          {/* Best clip */}
+          <Panel title="🏆 Best Clip Ever" action="View in gallery" onAction={() => onNavigate('clips')}>
+            {stats.bestClip ? (
+              <div style={{ display: 'flex', gap: 14, alignItems: 'center', paddingTop: 8 }}>
+                <div style={{ width: 80, height: 50, borderRadius: 8, overflow: 'hidden', flexShrink: 0, background: 'var(--bg-elevated)', display: 'flex', alignItems: 'center', justifyContent: 'center', position: 'relative' }}>
+                  {stats.bestClip.thumbnail
+                    ? <img src={toClipUrl(stats.bestClip.thumbnail)} alt="" style={{ width: '100%', height: '100%', objectFit: 'cover' }} />
+                    : <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5" opacity="0.3"><polygon points="5 3 19 12 5 21 5 3" /></svg>}
+                </div>
+                <div style={{ flex: 1, minWidth: 0 }}>
+                  <div style={{ fontSize: 13, fontWeight: 700, color: 'var(--text-primary)', marginBottom: 3, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{stats.bestClip.streamerName}</div>
+                  <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+                    <span style={{ fontSize: 22, fontWeight: 800, color: '#a78bfa', fontFamily: 'var(--font-display)' }}>{stats.bestClip.hypeScore}%</span>
+                    <span style={{ fontSize: 12, color: 'var(--text-muted)' }}>hype score</span>
+                  </div>
+                  <div style={{ fontSize: 11, color: 'var(--text-muted)', marginTop: 2 }}>{timeAgo(stats.bestClip.createdAt)}</div>
+                </div>
+              </div>
+            ) : null}
+          </Panel>
+
+          {/* Streamer leaderboard */}
+          <Panel title="📊 Streamer Leaderboard" action="See all clips" onAction={() => onNavigate('clips')}>
+            {stats.leaderboard.length === 0 ? (
+              <EmptyState icon="🏅" title="No data yet" sub="Start monitoring to build your leaderboard" />
+            ) : (
+              <div style={{ paddingTop: 4 }}>
+                {stats.leaderboard.map((s, i) => (
+                  <div key={s.name} style={{ display: 'flex', alignItems: 'center', gap: 10, padding: '7px 0', borderBottom: i < stats.leaderboard.length - 1 ? '1px solid rgba(255,255,255,0.04)' : 'none' }}>
+                    <span style={{ fontSize: 14, width: 20, textAlign: 'center', flexShrink: 0 }}>{['🥇','🥈','🥉','4️⃣','5️⃣'][i]}</span>
+                    <div style={{ flex: 1, minWidth: 0 }}>
+                      <div style={{ fontSize: 12, fontWeight: 600, color: 'var(--text-primary)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{s.name}</div>
+                      <div style={{ fontSize: 10, color: platformColor[s.platform] || '#888', fontWeight: 600, textTransform: 'capitalize' }}>{s.platform}</div>
+                    </div>
+                    <div style={{ textAlign: 'right', flexShrink: 0 }}>
+                      <div style={{ fontSize: 13, fontWeight: 700, color: 'var(--text-primary)' }}>{s.count} clips</div>
+                      <div style={{ fontSize: 10, color: 'var(--text-muted)' }}>best: {s.bestScore}%</div>
+                    </div>
+                  </div>
+                ))}
+              </div>
+            )}
+          </Panel>
+        </div>
+      )}
+
+      {/* Pending review banner */}
+      {stats.pendingReview > 0 && (
+        <div
+          onClick={() => onNavigate('clips')}
+          style={{
+            background: 'linear-gradient(135deg,rgba(124,58,237,0.12),rgba(37,99,235,0.08))',
+            border: '1px solid rgba(124,58,237,0.25)',
+            borderRadius: 12, padding: '14px 20px', marginBottom: 16,
+            display: 'flex', alignItems: 'center', gap: 14, cursor: 'pointer',
+          }}
+        >
+          <span style={{ fontSize: 22 }}>📬</span>
+          <div style={{ flex: 1 }}>
+            <span style={{ fontSize: 14, fontWeight: 700, color: '#c4b5fd' }}>{stats.pendingReview} clip{stats.pendingReview !== 1 ? 's' : ''} waiting for your review</span>
+            <span style={{ fontSize: 12, color: 'var(--text-muted)', marginLeft: 8 }}>Watch them and decide what to keep →</span>
+          </div>
+        </div>
+      )}
 
       {/* ── How it works footer */}
       <div style={{

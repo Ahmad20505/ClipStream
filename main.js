@@ -1,11 +1,12 @@
-const { app, BrowserWindow, ipcMain, dialog, shell, Notification, net } = require('electron');
+const { app, BrowserWindow, ipcMain, dialog, shell, Notification, net, protocol, Tray, Menu, nativeImage } = require('electron');
 const path = require('path');
 const fs = require('fs');
 const { spawn, exec } = require('child_process');
 const os = require('os');
 
 // ─── Bundled ffmpeg binary (no install needed) ───────────────────────────────
-const ffmpegPath = require('ffmpeg-static');
+// When packaged with asar, ffmpeg-static is unpacked — fix the path so the OS can execute it.
+const ffmpegPath = require('ffmpeg-static').replace('app.asar', 'app.asar.unpacked');
 
 // ─── Auto Updater ────────────────────────────────────────────────────────────
 const { autoUpdater } = require('electron-updater');
@@ -70,13 +71,21 @@ async function initStore() {
         outputDir: path.join(os.homedir(), 'Raw Clips'),
         clipBuffer: 30,
         clipDuration: 60,
-        audioThreshold: -20,   // kept for UI compat (used as floor only)
-        chatThreshold: 15,     // kept for UI compat
-        sensitivity: 50,       // 0 = very selective, 100 = clips everything
+        audioThreshold: -20,
+        chatThreshold: 15,
+        sensitivity: 50,
         autoStart: false,
         notifications: true,
         quality: 'best',
+        discordWebhook: '',        // Discord webhook URL for auto-posting clips
+        webhookUrl: '',            // Generic webhook URL
+        normalizeAudio: true,      // Normalize clip volume on save
+        autoCleanupDays: 0,        // 0 = disabled, else delete staged clips after N days
+        systemTray: true,          // Run in system tray when window closed
+        variableClipLength: true,  // Extend clip if hype continues
       },
+      streamerBaselines: {},       // Persistent baselines per streamer ID
+      streamerSettings: {},        // Per-streamer overrides (sensitivity etc.)
       apiKeys: {
         twitchClientId: '',
         twitchClientSecret: '',
@@ -111,7 +120,7 @@ function createWindow() {
       preload: path.join(__dirname, 'preload.js'),
       contextIsolation: true,
       nodeIntegration: false,
-      webSecurity: true,
+      webSecurity: false, // allows file:// URLs — safe for local-only desktop app
     },
     icon: path.join(__dirname, 'assets', 'icon.png'),
   });
@@ -126,14 +135,92 @@ function createWindow() {
   mainWindow.on('closed', () => { mainWindow = null; });
 }
 
+// ─── Local file protocol — lets the renderer load clip videos securely ────────
+// Registers clipfile:// so <video src="clipfile:///path/to/clip.mp4"> works
+// without disabling webSecurity or exposing arbitrary file:// access.
+protocol.registerSchemesAsPrivileged([
+  { scheme: 'clipfile', privileges: { secure: true, supportFetchAPI: true, stream: true } },
+]);
+
 app.whenReady().then(async () => {
+  // Handle clipfile:// requests by serving the local file
+  protocol.handle('clipfile', async (request) => {
+    try {
+      // Decode path segments individually so spaces and special chars work
+      const rawPath = request.url.slice('clipfile://'.length);
+      const filePath = rawPath.split('/').map(seg => decodeURIComponent(seg)).join('/');
+
+      if (!fs.existsSync(filePath)) {
+        console.error('[ClipStream] clipfile: file not found:', filePath);
+        return new Response('File not found', { status: 404 });
+      }
+
+      const stat = fs.statSync(filePath);
+      const total = stat.size;
+      const ext = path.extname(filePath).toLowerCase();
+      const mime = { '.mp4': 'video/mp4', '.webm': 'video/webm', '.mov': 'video/quicktime', '.jpg': 'image/jpeg', '.jpeg': 'image/jpeg', '.png': 'image/png' }[ext] || 'application/octet-stream';
+
+      // Handle Range requests — essential for video seeking in <video> element
+      const range = request.headers.get('Range');
+      if (range) {
+        const [startStr, endStr] = range.replace(/bytes=/, '').split('-');
+        const start = parseInt(startStr, 10);
+        const end = endStr ? parseInt(endStr, 10) : total - 1;
+        const chunkSize = end - start + 1;
+        const nodeStream = fs.createReadStream(filePath, { start, end });
+        const webStream = new ReadableStream({
+          start(ctrl) {
+            nodeStream.on('data', chunk => ctrl.enqueue(chunk));
+            nodeStream.on('end', () => ctrl.close());
+            nodeStream.on('error', err => ctrl.error(err));
+          },
+          cancel() { nodeStream.destroy(); },
+        });
+        return new Response(webStream, {
+          status: 206,
+          headers: {
+            'Content-Type': mime,
+            'Content-Range': `bytes ${start}-${end}/${total}`,
+            'Accept-Ranges': 'bytes',
+            'Content-Length': String(chunkSize),
+          },
+        });
+      }
+
+      // Full file response
+      const nodeStream = fs.createReadStream(filePath);
+      const webStream = new ReadableStream({
+        start(ctrl) {
+          nodeStream.on('data', chunk => ctrl.enqueue(chunk));
+          nodeStream.on('end', () => ctrl.close());
+          nodeStream.on('error', err => ctrl.error(err));
+        },
+        cancel() { nodeStream.destroy(); },
+      });
+      return new Response(webStream, {
+        status: 200,
+        headers: {
+          'Content-Type': mime,
+          'Accept-Ranges': 'bytes',
+          'Content-Length': String(total),
+        },
+      });
+    } catch (e) {
+      console.error('[ClipStream] clipfile protocol error:', e.message, request.url);
+      return new Response('File not found', { status: 404 });
+    }
+  });
+
   await initStore();
   ensureOutputDir();
   cleanupOldThumbnails();
   createWindow();
+  createTray();
   scheduleRenewalCheck();
+  scheduleDailyDigest();
   checkStreamlinkInstalled();
   initAutoUpdater();
+  scheduleAutoCleanup();
   app.on('activate', () => {
     if (BrowserWindow.getAllWindows().length === 0) createWindow();
   });
@@ -288,7 +375,92 @@ function fallbackToManual(win) {
   });
 }
 
+// ─── System Tray ─────────────────────────────────────────────────────────────
+let tray = null;
+
+function createTray() {
+  try {
+    // Use a simple colored dot as the tray icon
+    const iconPath = path.join(__dirname, 'assets', 'icon.png');
+    const icon = nativeImage.createFromPath(iconPath).resize({ width: 16, height: 16 });
+    tray = new Tray(icon);
+    tray.setToolTip('ClipStream — AI Clip Monitor');
+    updateTrayMenu();
+
+    tray.on('click', () => {
+      if (mainWindow) {
+        mainWindow.isVisible() ? mainWindow.hide() : mainWindow.show();
+      } else {
+        createWindow();
+      }
+    });
+  } catch (e) {
+    console.error('[ClipStream] Tray error:', e.message);
+  }
+}
+
+function updateTrayMenu() {
+  if (!tray) return;
+  const liveCount   = activeMonitors.size;
+  const pendingClips = store.get('recentClips', []).filter(c => c.staged).length;
+  const contextMenu = Menu.buildFromTemplate([
+    { label: 'ClipStream', enabled: false },
+    { type: 'separator' },
+    { label: liveCount > 0 ? `${liveCount} stream${liveCount > 1 ? 's' : ''} live` : 'No live streams', enabled: false },
+    { label: pendingClips > 0 ? `${pendingClips} clips awaiting review` : 'No clips to review', enabled: false },
+    { type: 'separator' },
+    { label: 'Show ClipStream', click: () => { if (mainWindow) mainWindow.show(); else createWindow(); } },
+    { label: 'Open Clip Gallery', click: () => { if (mainWindow) { mainWindow.show(); sendToRenderer('navigate', 'clips'); } } },
+    { type: 'separator' },
+    { label: 'Quit', click: () => { stopAllMonitors(); app.quit(); } },
+  ]);
+  tray.setContextMenu(contextMenu);
+}
+
+// Update tray every 30s to reflect live state
+setInterval(updateTrayMenu, 30000);
+
+// ─── Auto Cleanup ─────────────────────────────────────────────────────────────
+function scheduleAutoCleanup() {
+  // Run once on startup, then every 6 hours
+  runAutoCleanup();
+  setInterval(runAutoCleanup, 6 * 60 * 60 * 1000);
+}
+
+function runAutoCleanup() {
+  const settings = store.get('settings');
+  const days = settings.autoCleanupDays ?? 0;
+  if (!days || days <= 0) return;
+
+  const cutoff = Date.now() - days * 24 * 60 * 60 * 1000;
+  const clips = store.get('recentClips', []);
+  let removed = 0;
+
+  const remaining = clips.filter(clip => {
+    if (clip.staged && clip.createdAt < cutoff) {
+      // Delete the actual file and thumbnail
+      try { if (fs.existsSync(clip.path)) fs.unlinkSync(clip.path); } catch {}
+      try { if (clip.thumbnail && fs.existsSync(clip.thumbnail)) fs.unlinkSync(clip.thumbnail); } catch {}
+      removed++;
+      return false;
+    }
+    return true;
+  });
+
+  if (removed > 0) {
+    store.set('recentClips', remaining);
+    sendToRenderer('clips:refreshed', remaining);
+    console.log(`[ClipStream] Auto-cleanup: removed ${removed} old staged clip(s)`);
+  }
+}
+
 app.on('window-all-closed', () => {
+  const settings = store.get('settings');
+  // If system tray is enabled, keep running in background on close
+  if (settings.systemTray !== false && tray) {
+    if (mainWindow) mainWindow.hide();
+    return;
+  }
   stopAllMonitors();
   if (process.platform !== 'darwin') app.quit();
 });
@@ -337,6 +509,13 @@ function streamerClipDir(settings, streamer) {
     safeName(streamer.platform || 'unknown'),
     safeName(streamer.displayName),
   );
+  if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
+  return dir;
+}
+
+// Internal staging dir — clips land here first before user saves them.
+function stagingDir() {
+  const dir = path.join(app.getPath('userData'), 'staging');
   if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
   return dir;
 }
@@ -390,6 +569,18 @@ ipcMain.handle('monitor:start', async (event, streamer) => {
   }
   try {
     const session = new MonitorSession(streamer);
+    // Load previously learned baseline — skip the 90s warmup for returning streamers
+    const savedBaselines = store.get('streamerBaselines', {});
+    if (savedBaselines[streamer.id]) {
+      const b = savedBaselines[streamer.id];
+      // Only use saved baseline if it's from the last 30 days
+      if (Date.now() - b.updatedAt < 30 * 24 * 60 * 60 * 1000) {
+        session.audioBaseline = b.audio;
+        session.chatBaseline  = b.chat;
+        session.startedAt     = Date.now() - 91000; // skip warmup immediately
+        console.log(`[ClipStream] Loaded saved baseline for ${streamer.displayName}: audio=${b.audio?.toFixed(1)}, chat=${b.chat?.toFixed(1)}`);
+      }
+    }
     activeMonitors.set(streamer.id, session);
     startMonitorSession(session);
 
@@ -409,6 +600,16 @@ ipcMain.handle('monitor:start', async (event, streamer) => {
 ipcMain.handle('monitor:stop', async (event, streamerId) => {
   const session = activeMonitors.get(streamerId);
   if (session) {
+    // Save learned baseline so next session starts smart
+    if (session.audioBaseline !== null) {
+      const baselines = store.get('streamerBaselines', {});
+      baselines[streamerId] = {
+        audio: session.audioBaseline,
+        chat: session.chatBaseline,
+        updatedAt: Date.now(),
+      };
+      store.set('streamerBaselines', baselines);
+    }
     session.destroy();
     activeMonitors.delete(streamerId);
   }
@@ -884,12 +1085,12 @@ function computeBaseline(arr, minSamples = 12) {
 function checkForClipTrigger(session, settings) {
   const now = Date.now();
 
-  // ── Cooldown: min 60 s between clips so we don't re-clip the same moment ──
-  const cooldown = 60000;
+  // ── Cooldown: min 3 min between clips — quality over quantity ─────────────
+  const cooldown = 180000;
   if (now - session.lastClipTime < cooldown) return;
 
-  // ── Warmup: need ≥ 60 s of data before we have a reliable baseline ─────────
-  const warmup = 60000;
+  // ── Warmup: need ≥ 90 s of data before we have a reliable baseline ─────────
+  const warmup = 90000;
   if (now - session.startedAt < warmup) return;
 
   // ── Compute this streamer's personal baselines ─────────────────────────────
@@ -901,35 +1102,40 @@ function checkForClipTrigger(session, settings) {
 
   // ── Audio spike: dB above this streamer's normal level ────────────────────
   const audioSpikeDb = session.audioLevel - audioBaseline;
-  // Require at least 5 dB above normal (configurable via sensitivity setting)
-  const sensitivity    = Math.max(0, Math.min(100, settings.sensitivity ?? 50));
-  const audioNeed      = 10 - (sensitivity / 100) * 6;   // 4–10 dB depending on sensitivity
-  const audioTriggered = audioSpikeDb >= audioNeed && session.audioLevel > -45;
+  // Check for per-streamer sensitivity override, fall back to global
+  const streamerOverride = store.get(`streamerSettings.${session.streamer.id}`, {});
+  const rawSensitivity   = streamerOverride.sensitivity ?? settings.sensitivity ?? 50;
+  const sensitivity      = Math.max(0, Math.min(100, rawSensitivity));
+  // Raised floor — needs a bigger spike to qualify
+  const audioNeed      = 14 - (sensitivity / 100) * 6;   // 8–14 dB depending on sensitivity
+  const audioTriggered = audioSpikeDb >= audioNeed && session.audioLevel > -40;
 
   // ── Chat spike: multiple of this streamer's normal rate ───────────────────
-  const chatBase       = Math.max(chatBaseline ?? 0, 3);  // at least 3 so divide is safe
+  const chatBase       = Math.max(chatBaseline ?? 0, 3);
   const chatMultiplier = session.chatRate / chatBase;
-  // Require 2× normal (configurable)
-  const chatNeed       = 2.5 - (sensitivity / 100) * 1.0; // 1.5–2.5× depending on sensitivity
-  const chatTriggered  = chatMultiplier >= chatNeed && session.chatRate >= 5;
+  // Require 3× normal chat rate minimum — filters out small bumps
+  const chatNeed       = 3.0 - (sensitivity / 100) * 1.0; // 2.0–3.0× depending on sensitivity
+  const chatTriggered  = chatMultiplier >= chatNeed && session.chatRate >= 8;
 
   // ── Hype score 0–1 ────────────────────────────────────────────────────────
   const audioScore = Math.min(1, Math.max(0, (audioSpikeDb - audioNeed)  / 8));
-  const chatScore  = Math.min(1, Math.max(0, (chatMultiplier - 1)        / 3));
+  const chatScore  = Math.min(1, Math.max(0, (chatMultiplier - 1)        / 4));
   const hypeScore  = audioScore * 0.55 + chatScore * 0.45;
 
-  // ── Trigger logic ─────────────────────────────────────────────────────────
+  // ── Trigger logic — BOTH signals must fire for most clips ─────────────────
   const chatWorking = session.chatEverActive || (now - session.startedAt < 120000);
 
-  // Normal: both signals must spike simultaneously
+  // Require both audio AND chat to spike simultaneously
   const bothTriggered = audioTriggered && chatTriggered;
-  // Single-signal extreme spikes (very rare — think "streamer shouts unexpectedly")
-  const extremeAudio  = audioSpikeDb >= audioNeed + 8 && chatWorking && session.chatRate >= 3;
-  const extremeChat   = chatMultiplier >= chatNeed  + 2 && audioSpikeDb >= 2;
-  // Audio-only fallback when chat never connected after grace period
-  const audioOnly     = !chatWorking && audioSpikeDb >= audioNeed + 6;
+  // Only clip on a single signal if it's truly extreme (huge outlier moments)
+  const extremeAudio  = audioSpikeDb >= audioNeed + 10 && chatWorking && session.chatRate >= 5;
+  const extremeChat   = chatMultiplier >= chatNeed  + 3 && audioSpikeDb >= 4;
+  // Audio-only fallback only when chat genuinely never connected
+  const audioOnly     = !chatWorking && audioSpikeDb >= audioNeed + 8;
 
-  const shouldClip = bothTriggered || extremeAudio || extremeChat || audioOnly;
+  // Hype score must also clear a minimum bar — filters borderline moments
+  const scoreThreshold = 0.35 + (1 - sensitivity / 100) * 0.25; // 0.35–0.60
+  const shouldClip = (bothTriggered || extremeAudio || extremeChat || audioOnly) && hypeScore >= scoreThreshold;
 
   if (shouldClip) {
     const reason = bothTriggered ? 'both' : extremeAudio ? 'extreme-audio' : extremeChat ? 'extreme-chat' : 'audio-only';
@@ -939,21 +1145,43 @@ function checkForClipTrigger(session, settings) {
       `chat×${chatMultiplier.toFixed(1)} (base ${chatBase.toFixed(0)}) ` +
       `score=${hypeScore.toFixed(2)} reason=${reason}`
     );
+    // ── Deduplication: skip if last clip was less than 10s ago ────────────────
+    // This prevents double-clips when a stream briefly drops and reconnects
+    if (now - session.lastClipTime < 10000) {
+      console.log(`[ClipStream] Skipping duplicate clip for ${session.streamer.displayName} — too soon after last clip`);
+      return;
+    }
+
+    // ── Smart merging: if last clip was < 2 min ago, flag as consecutive ──────
+    const timeSinceLast = now - session.lastClipTime;
+    const isMergeCandidate = timeSinceLast < 120000 && timeSinceLast > 10000;
+
     session.lastClipTime = now;
-    captureClip(session, settings, hypeScore);
+    captureClip(session, settings, hypeScore, reason, isMergeCandidate);
   }
 }
 
-async function captureClip(session, settings, hypeScore = 0.5) {
+async function captureClip(session, settings, hypeScore = 0.5, reason = 'both', isMergeCandidate = false) {
   const streamUrl = getStreamUrl(session.streamer);
-  const outputDir = streamerClipDir(settings, session.streamer);
 
+  // Clips land in staging first — user reviews and saves from the gallery
   const timestamp = new Date().toISOString().replace(/[:.]/g, '-');
   const filename = `${safeName(session.streamer.displayName)}_${timestamp}.mp4`;
-  const outputPath = path.join(outputDir, filename);
-  const duration = settings.clipDuration || 60;
+  const outputPath = path.join(stagingDir(), filename);
+  // Variable clip length — extend if hype is still elevated (max 3× base duration)
+  let duration = settings.clipDuration || 60;
+  if (settings.variableClipLength !== false) {
+    const audioBaseline = session.audioBaseline ?? -30;
+    const audioSpikeNow = session.audioLevel - audioBaseline;
+    const chatSpikeNow  = session.chatRate / Math.max(session.chatBaseline ?? 3, 3);
+    if (audioSpikeNow > 12 || chatSpikeNow > 3.5) {
+      duration = Math.min(duration * 2, 180); // double duration for big moments
+    } else if (audioSpikeNow > 8 || chatSpikeNow > 2.5) {
+      duration = Math.min(Math.round(duration * 1.5), 120);
+    }
+  }
 
-  console.log(`[ClipStream] Starting clip capture → ${outputPath}`);
+  console.log(`[ClipStream] Starting clip capture → staging → ${outputPath}`);
 
   // Helper: save clip data to store and notify renderer
   function finalizeClip() {
@@ -973,13 +1201,16 @@ async function captureClip(session, settings, hypeScore = 0.5) {
         platform: session.streamer.platform,
         filename,
         path: outputPath,
+        staged: true,   // clip is in staging — not yet saved to user's folder
         duration,
         createdAt: Date.now(),
         audioLevel: session.audioLevel,
         chatRate: session.chatRate,
         audioBaseline: session.audioBaseline,
         chatBaseline: session.chatBaseline,
-        hypeScore: Math.round(hypeScore * 100), // 0–100
+        hypeScore: Math.round(hypeScore * 100),
+        reason,
+        consecutive: isMergeCandidate, // true = part of an ongoing hype chain
         thumbnail: null,
       };
 
@@ -992,7 +1223,11 @@ async function captureClip(session, settings, hypeScore = 0.5) {
 
       sendToRenderer('clip:created', clipData);
       sendToRenderer('monitor:update', { id: session.streamer.id, clipsCreated: session.clipsCreated });
-      notifyUser('🎬 New clip saved!', `${session.streamer.displayName} · ${filename}`);
+      notifyUser('🎬 New clip ready to review!', `${session.streamer.displayName} — check Clip Gallery`);
+
+      // Fire webhooks asynchronously (don't block clip creation)
+      const settings = store.get('settings');
+      fireWebhooks(clipData, settings).catch(() => {});
     } catch (e) {
       console.error('[ClipStream] finalizeClip error:', e.message);
     }
@@ -1119,6 +1354,61 @@ async function captureClip(session, settings, hypeScore = 0.5) {
   }
 }
 
+// ─── Webhooks ────────────────────────────────────────────────────────────────
+async function fireWebhooks(clip, settings) {
+  const { default: nodeFetch } = await import('node-fetch');
+
+  // Discord webhook
+  if (settings.discordWebhook) {
+    try {
+      const score = clip.hypeScore ?? 0;
+      const emoji = score >= 80 ? '🔥' : score >= 60 ? '⚡' : '🎬';
+      const color = score >= 80 ? 0xa855f7 : score >= 60 ? 0xfbbf24 : 0x3b82f6;
+      await nodeFetch(settings.discordWebhook, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          username: 'ClipStream',
+          embeds: [{
+            title: `${emoji} New clip — ${clip.streamerName}`,
+            description: `**Platform:** ${clip.platform}\n**Hype Score:** ${score}%\n**Reason:** ${clip.reason ?? 'hype moment'}`,
+            color,
+            footer: { text: `ClipStream AI · ${new Date(clip.createdAt).toLocaleString()}` },
+          }],
+        }),
+      });
+      console.log('[ClipStream] Discord webhook posted');
+    } catch (e) {
+      console.error('[ClipStream] Discord webhook error:', e.message);
+    }
+  }
+
+  // Generic webhook
+  if (settings.webhookUrl) {
+    try {
+      await nodeFetch(settings.webhookUrl, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          event: 'clip.created',
+          clip: {
+            id: clip.id,
+            streamer: clip.streamerName,
+            platform: clip.platform,
+            hypeScore: clip.hypeScore,
+            reason: clip.reason,
+            duration: clip.duration,
+            createdAt: clip.createdAt,
+          },
+        }),
+      });
+      console.log('[ClipStream] Generic webhook posted');
+    } catch (e) {
+      console.error('[ClipStream] Generic webhook error:', e.message);
+    }
+  }
+}
+
 function generateThumbnail(videoPath, clipData) {
   // Store thumbnails in app userData — NOT in the user's clips folder
   const thumbFilename = `${clipData.id}.jpg`;
@@ -1164,6 +1454,184 @@ ipcMain.handle('clips:openFolder', async () => {
   shell.openPath(dir);
   return { success: true };
 });
+
+// Save a staged clip to the user's clips folder
+ipcMain.handle('clips:save', async (event, clipId) => {
+  const clips = store.get('recentClips', []);
+  const idx = clips.findIndex(c => c.id === clipId);
+  if (idx === -1) return { success: false, error: 'Clip not found' };
+
+  const clip = clips[idx];
+  if (!clip.staged) return { success: true }; // already saved
+
+  try {
+    // Show a save dialog so the user chooses exactly where the clip goes
+    const defaultName = `${clip.streamerName}_${new Date(clip.createdAt).toLocaleDateString('en-US', { month: 'short', day: 'numeric' }).replace(' ', '-')}.mp4`;
+    const result = await dialog.showSaveDialog(mainWindow, {
+      title: 'Save Clip',
+      defaultPath: path.join(require('os').homedir(), 'Downloads', defaultName),
+      filters: [{ name: 'MP4 Video', extensions: ['mp4'] }],
+      buttonLabel: 'Save Clip',
+    });
+
+    if (result.canceled || !result.filePath) {
+      return { success: false, canceled: true };
+    }
+
+    const destPath = result.filePath;
+    const settings = store.get('settings');
+
+    // Audio normalization — re-encode with loudnorm filter if enabled
+    if (settings.normalizeAudio !== false) {
+      await new Promise((resolve) => {
+        const ff = spawn(ffmpegPath, [
+          '-y', '-i', clip.path,
+          '-af', 'loudnorm=I=-16:TP=-1.5:LRA=11',
+          '-c:v', 'copy',
+          '-c:a', 'aac', '-b:a', '192k',
+          '-movflags', '+faststart',
+          '-loglevel', 'warning',
+          destPath,
+        ]);
+        ff.on('close', resolve);
+        ff.on('error', () => {
+          try { fs.copyFileSync(clip.path, destPath); } catch {}
+          resolve();
+        });
+      });
+    } else {
+      fs.copyFileSync(clip.path, destPath);
+    }
+
+    // Mark as saved and reveal in Finder/Explorer
+    clips[idx] = { ...clip, staged: false, path: destPath };
+    store.set('recentClips', clips);
+    sendToRenderer('clip:updated', clips[idx]);
+    shell.showItemInFolder(destPath);
+    return { success: true, path: destPath };
+  } catch (e) {
+    console.error('[ClipStream] clips:save error:', e.message);
+    return { success: false, error: e.message };
+  }
+});
+
+// Save ALL staged clips — user picks one folder, all clips land there
+ipcMain.handle('clips:saveAll', async () => {
+  const clips = store.get('recentClips', []);
+  const staged = clips.filter(c => c.staged);
+  if (!staged.length) return { success: true, saved: 0 };
+
+  const result = await dialog.showOpenDialog(mainWindow, {
+    title: `Choose folder to save ${staged.length} clip${staged.length > 1 ? 's' : ''}`,
+    properties: ['openDirectory', 'createDirectory'],
+    buttonLabel: 'Save Here',
+  });
+
+  if (result.canceled || !result.filePaths[0]) return { success: false, canceled: true };
+
+  const destDir = result.filePaths[0];
+  const settings = store.get('settings');
+  let saved = 0;
+
+  for (const clip of staged) {
+    try {
+      const defaultName = `${clip.streamerName}_${new Date(clip.createdAt).toLocaleDateString('en-US', { month: 'short', day: 'numeric' }).replace(' ', '-')}_${saved + 1}.mp4`;
+      const destPath = path.join(destDir, defaultName);
+
+      if (settings.normalizeAudio !== false) {
+        await new Promise((resolve) => {
+          const ff = spawn(ffmpegPath, [
+            '-y', '-i', clip.path,
+            '-af', 'loudnorm=I=-16:TP=-1.5:LRA=11',
+            '-c:v', 'copy', '-c:a', 'aac', '-b:a', '192k',
+            '-movflags', '+faststart', '-loglevel', 'warning',
+            destPath,
+          ]);
+          ff.on('close', resolve);
+          ff.on('error', () => { try { fs.copyFileSync(clip.path, destPath); } catch {} resolve(); });
+        });
+      } else {
+        fs.copyFileSync(clip.path, destPath);
+      }
+
+      const allClips = store.get('recentClips', []);
+      const idx = allClips.findIndex(c => c.id === clip.id);
+      if (idx !== -1) {
+        allClips[idx] = { ...clip, staged: false, path: destPath };
+        store.set('recentClips', allClips);
+        sendToRenderer('clip:updated', allClips[idx]);
+      }
+      saved++;
+    } catch (e) {
+      console.error('[ClipStream] saveAll error for clip:', clip.id, e.message);
+    }
+  }
+
+  if (saved > 0) shell.openPath(destDir);
+  return { success: true, saved };
+});
+
+// ─── Social Export IPC ───────────────────────────────────────────────────────
+// Exports a clip to a specific social format using ffmpeg
+ipcMain.handle('clips:export', async (event, { clipId, format, trimStart, trimEnd }) => {
+  const clips = store.get('recentClips', []);
+  const clip = clips.find(c => c.id === clipId);
+  if (!clip) return { success: false, error: 'Clip not found' };
+
+  const formatConfigs = {
+    tiktok:  { suffix: '_tiktok',  vf: 'crop=ih*9/16:ih,scale=1080:1920', maxDuration: 60,  note: 'TikTok (9:16 vertical)' },
+    shorts:  { suffix: '_shorts',  vf: 'crop=ih*9/16:ih,scale=1080:1920', maxDuration: 60,  note: 'YouTube Shorts (9:16)' },
+    twitter: { suffix: '_twitter', vf: 'scale=1280:720',                   maxDuration: 140, note: 'Twitter/X (16:9)' },
+    trim:    { suffix: '_trim',    vf: null,                                maxDuration: null, note: 'Trimmed clip' },
+  };
+
+  const cfg = formatConfigs[format];
+  if (!cfg) return { success: false, error: 'Unknown format' };
+
+  // Pick save location via dialog
+  const result = await dialog.showSaveDialog(mainWindow, {
+    title: `Export for ${cfg.note}`,
+    defaultPath: path.join(
+      store.get('settings.outputDir'),
+      path.basename(clip.filename, '.mp4') + cfg.suffix + '.mp4'
+    ),
+    filters: [{ name: 'MP4 Video', extensions: ['mp4'] }],
+  });
+  if (result.canceled || !result.filePath) return { success: false, error: 'Cancelled' };
+
+  const outputPath = result.filePath;
+  const inputPath  = clip.path;
+
+  const args = ['-y'];
+  if (trimStart != null) args.push('-ss', String(trimStart));
+  args.push('-i', inputPath);
+  if (trimEnd != null && trimStart != null) args.push('-t', String(trimEnd - trimStart));
+  else if (cfg.maxDuration) args.push('-t', String(cfg.maxDuration));
+
+  if (cfg.vf) {
+    args.push('-vf', cfg.vf);
+    args.push('-c:v', 'libx264', '-preset', 'fast', '-crf', '23');
+  } else {
+    args.push('-c:v', 'copy');
+  }
+  args.push('-c:a', 'aac', '-b:a', '192k', '-movflags', '+faststart', '-loglevel', 'warning', outputPath);
+
+  return new Promise((resolve) => {
+    const ff = spawn(ffmpegPath, args);
+    ff.on('error', (err) => resolve({ success: false, error: err.message }));
+    ff.on('close', (code) => {
+      if (code === 0) {
+        shell.showItemInFolder(outputPath);
+        resolve({ success: true, path: outputPath });
+      } else {
+        resolve({ success: false, error: `ffmpeg exited with code ${code}` });
+      }
+    });
+  });
+});
+
+// ─── Clip Trim IPC ───────────────────────────────────────────────────────────
+// clips:trim is handled by clips:export with format='trim' — no separate handler needed
 
 // ─── Settings IPC ────────────────────────────────────────────────────────────
 ipcMain.handle('settings:get', async () => store.get('settings'));
@@ -1534,6 +2002,109 @@ function scheduleRenewalCheck() {
   }, 60 * 60 * 1000); // every hour
 }
 
+// ─── Daily Digest Email ──────────────────────────────────────────────────────
+function scheduleDailyDigest() {
+  const checkDigest = () => {
+    const now = new Date();
+    if (now.getHours() !== 8 || now.getMinutes() > 5) return; // only fire ~8:00 AM
+
+    const smtp = store.get('smtp', {});
+    if (!smtp.host || !smtp.user) return; // no SMTP configured
+
+    const account = store.get('account', {});
+    const email = account.email;
+    if (!email) return;
+
+    const lastDigest = store.get('lastDigestSent', 0);
+    const today = new Date().setHours(0, 0, 0, 0);
+    if (lastDigest >= today) return; // already sent today
+
+    // Collect yesterday's clips
+    const yesterday = today - 86400000;
+    const clips = store.get('recentClips', []);
+    const yesterdayClips = clips.filter(c => c.createdAt >= yesterday && c.createdAt < today);
+    if (yesterdayClips.length === 0) return;
+
+    store.set('lastDigestSent', Date.now());
+    sendDailyDigest(email, yesterdayClips, smtp);
+  };
+
+  // Check every 5 minutes
+  setInterval(checkDigest, 5 * 60 * 1000);
+  checkDigest();
+}
+
+async function sendDailyDigest(toEmail, clips, smtp) {
+  try {
+    const nodemailer = require('nodemailer');
+    const transporter = nodemailer.createTransport({
+      host: smtp.host, port: smtp.port || 587, secure: smtp.port === 465,
+      auth: { user: smtp.user, pass: smtp.pass },
+    });
+
+    const totalClips  = clips.length;
+    const avgHype     = Math.round(clips.reduce((s, c) => s + (c.hypeScore ?? 0), 0) / totalClips);
+    const bestClip    = clips.reduce((a, b) => (b.hypeScore ?? 0) > (a.hypeScore ?? 0) ? b : a);
+    const date        = new Date(Date.now() - 86400000).toLocaleDateString('en-US', { weekday: 'long', month: 'long', day: 'numeric' });
+
+    const clipsHtml = clips.slice(0, 10).map(c => `
+      <tr>
+        <td style="padding:8px 12px;border-bottom:1px solid #1e2030;font-size:13px;color:#c4b5fd;">${c.streamerName}</td>
+        <td style="padding:8px 12px;border-bottom:1px solid #1e2030;font-size:13px;color:#9ca3af;text-transform:capitalize;">${c.platform}</td>
+        <td style="padding:8px 12px;border-bottom:1px solid #1e2030;font-size:13px;font-weight:700;color:${(c.hypeScore ?? 0) >= 70 ? '#a78bfa' : '#fbbf24'};">${c.hypeScore ?? 0}%</td>
+        <td style="padding:8px 12px;border-bottom:1px solid #1e2030;font-size:11px;color:#6b7280;">${new Date(c.createdAt).toLocaleTimeString()}</td>
+      </tr>
+    `).join('');
+
+    await transporter.sendMail({
+      from: `"${smtp.fromName || 'ClipStream'}" <${smtp.user}>`,
+      to: toEmail,
+      subject: `🎬 ClipStream Daily Digest — ${totalClips} clip${totalClips !== 1 ? 's' : ''} from ${date}`,
+      html: `
+        <div style="background:#0a0a0f;padding:32px;font-family:sans-serif;max-width:600px;margin:0 auto;">
+          <h1 style="color:#a78bfa;font-size:22px;margin:0 0 4px;">🎬 ClipStream Daily Digest</h1>
+          <p style="color:#6b7280;font-size:13px;margin:0 0 24px;">${date}</p>
+
+          <div style="display:flex;gap:16px;margin-bottom:24px;">
+            <div style="flex:1;background:#13141f;border:1px solid #1e2030;border-radius:10px;padding:16px;text-align:center;">
+              <div style="font-size:28px;font-weight:800;color:#a78bfa;">${totalClips}</div>
+              <div style="font-size:12px;color:#6b7280;margin-top:4px;">Clips captured</div>
+            </div>
+            <div style="flex:1;background:#13141f;border:1px solid #1e2030;border-radius:10px;padding:16px;text-align:center;">
+              <div style="font-size:28px;font-weight:800;color:#fbbf24;">${avgHype}%</div>
+              <div style="font-size:12px;color:#6b7280;margin-top:4px;">Avg hype score</div>
+            </div>
+            <div style="flex:1;background:#13141f;border:1px solid #1e2030;border-radius:10px;padding:16px;text-align:center;">
+              <div style="font-size:28px;font-weight:800;color:#4ade80;">${bestClip.hypeScore ?? 0}%</div>
+              <div style="font-size:12px;color:#6b7280;margin-top:4px;">Best clip</div>
+            </div>
+          </div>
+
+          <table style="width:100%;border-collapse:collapse;background:#13141f;border-radius:10px;overflow:hidden;">
+            <thead>
+              <tr style="background:#1e2030;">
+                <th style="padding:10px 12px;text-align:left;font-size:11px;color:#6b7280;font-weight:600;text-transform:uppercase;">Streamer</th>
+                <th style="padding:10px 12px;text-align:left;font-size:11px;color:#6b7280;font-weight:600;text-transform:uppercase;">Platform</th>
+                <th style="padding:10px 12px;text-align:left;font-size:11px;color:#6b7280;font-weight:600;text-transform:uppercase;">Hype</th>
+                <th style="padding:10px 12px;text-align:left;font-size:11px;color:#6b7280;font-weight:600;text-transform:uppercase;">Time</th>
+              </tr>
+            </thead>
+            <tbody>${clipsHtml}</tbody>
+          </table>
+
+          ${clips.length > 10 ? `<p style="color:#6b7280;font-size:12px;text-align:center;margin-top:12px;">+${clips.length - 10} more clips in ClipStream</p>` : ''}
+
+          <p style="color:#374151;font-size:11px;text-align:center;margin-top:24px;">ClipStream AI · Sent automatically each morning</p>
+        </div>
+      `,
+    });
+
+    console.log(`[ClipStream] Daily digest sent to ${toEmail} — ${totalClips} clips`);
+  } catch (e) {
+    console.error('[ClipStream] Daily digest error:', e.message);
+  }
+}
+
 // ─── Window Controls IPC ─────────────────────────────────────────────────────
 ipcMain.on('window:minimize', () => mainWindow?.minimize());
 ipcMain.on('window:maximize', () => {
@@ -1541,6 +2112,56 @@ ipcMain.on('window:maximize', () => {
   else mainWindow?.maximize();
 });
 ipcMain.on('window:close', () => mainWindow?.close());
+
+// ─── Per-streamer settings ───────────────────────────────────────────────────
+ipcMain.handle('streamerSettings:get', async (event, streamerId) => {
+  return store.get(`streamerSettings.${streamerId}`, {});
+});
+ipcMain.handle('streamerSettings:set', async (event, { streamerId, settings }) => {
+  store.set(`streamerSettings.${streamerId}`, settings);
+  return { success: true };
+});
+
+// ─── Clip ratings ────────────────────────────────────────────────────────────
+ipcMain.handle('clips:rate', async (event, { clipId, rating }) => {
+  const clips = store.get('recentClips', []);
+  const idx = clips.findIndex(c => c.id === clipId);
+  if (idx === -1) return { success: false };
+  clips[idx] = { ...clips[idx], rating };
+  store.set('recentClips', clips);
+
+  // Update per-streamer sensitivity nudge based on ratings
+  const clip = clips[idx];
+  const skey = `streamerSettings.${clip.streamerId}`;
+  const sSettings = store.get(skey, {});
+  // Track average rating to influence detection — high ratings = keep current, low = tighten
+  const streamerClips = clips.filter(c => c.streamerId === clip.streamerId && c.rating);
+  if (streamerClips.length >= 5) {
+    const avgRating = streamerClips.reduce((s, c) => s + c.rating, 0) / streamerClips.length;
+    // avgRating 1-5: if < 2.5 tighten, if > 3.5 loosen slightly
+    sSettings.ratingFeedbackSensitivity = Math.round(avgRating * 10); // 10-50 nudge value
+    store.set(skey, sSettings);
+  }
+
+  sendToRenderer('clip:updated', clips[idx]);
+  return { success: true };
+});
+
+// ─── Disk usage ──────────────────────────────────────────────────────────────
+ipcMain.handle('disk:usage', async () => {
+  const clips = store.get('recentClips', []);
+  let stagingBytes = 0, savedBytes = 0;
+  for (const clip of clips) {
+    try {
+      const stat = fs.existsSync(clip.path) ? fs.statSync(clip.path) : null;
+      if (stat) {
+        if (clip.staged) stagingBytes += stat.size;
+        else savedBytes += stat.size;
+      }
+    } catch {}
+  }
+  return { stagingBytes, savedBytes, totalBytes: stagingBytes + savedBytes, clipCount: clips.length };
+});
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
 function sendToRenderer(channel, data) {

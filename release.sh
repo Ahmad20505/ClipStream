@@ -8,11 +8,8 @@ npm version patch --no-git-tag-version
 VERSION=$(node -p "require('./package.json').version")
 echo "Releasing v$VERSION..."
 
-# Also rebuild locally
-sh ~/Desktop/ClipStream/build.sh
-
-# Commit, tag, and push — this triggers GitHub Actions
-git add package.json
+# Commit, tag, and push — GitHub Actions builds Mac + Windows in the cloud
+git add .
 git commit -m "Release v$VERSION"
 git tag "v$VERSION"
 git push && git push --tags
@@ -20,5 +17,6 @@ git push && git push --tags
 echo ""
 echo "========================================"
 echo "v$VERSION is building on GitHub Actions!"
-echo "Users will be notified to update automatically."
+echo "Check github.com/Ahmad20505/ClipStream/actions"
+echo "Users will be auto-notified when it's ready."
 echo "========================================"

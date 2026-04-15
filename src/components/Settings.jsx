@@ -140,10 +140,11 @@ function SectionHeader({ icon, title, subtitle }) {
 
 // ── TABS ─────────────────────────────────────────────────────────────────────
 const TABS = [
-  { id: 'account',   label: 'Account',    icon: Icon.user },
-  { id: 'detection', label: 'Detection',  icon: Icon.detection },
-  { id: 'api',       label: 'API Keys',   icon: Icon.api },
-  { id: 'receipts',  label: 'Receipts',   icon: Icon.mail },
+  { id: 'account',      label: 'Account',       icon: Icon.user },
+  { id: 'detection',    label: 'Detection',     icon: Icon.detection },
+  { id: 'integrations', label: 'Integrations',  icon: <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71"/><path d="M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71"/></svg> },
+  { id: 'api',          label: 'API Keys',      icon: Icon.api },
+  { id: 'receipts',     label: 'Receipts',      icon: Icon.mail },
 ];
 
 // ── Main Component ────────────────────────────────────────────────────────────
@@ -158,6 +159,12 @@ export default function Settings({ settings, onSave, subscription, onLogout }) {
     sensitivity: settings?.sensitivity ?? 50,
     notifications: settings?.notifications ?? true,
     quality: settings?.quality || 'best',
+    discordWebhook: settings?.discordWebhook || '',
+    webhookUrl: settings?.webhookUrl || '',
+    normalizeAudio: settings?.normalizeAudio ?? true,
+    autoCleanupDays: settings?.autoCleanupDays ?? 0,
+    systemTray: settings?.systemTray ?? true,
+    variableClipLength: settings?.variableClipLength ?? true,
     smtpHost: '',
     smtpPort: 587,
     smtpUser: '',
@@ -172,12 +179,14 @@ export default function Settings({ settings, onSave, subscription, onLogout }) {
   const [showLogoutConfirm, setShowLogoutConfirm] = useState(false);
   const [loggingOut, setLoggingOut] = useState(false);
   const [authStatus, setAuthStatus] = useState(null);
+  const [diskUsage, setDiskUsage] = useState(null);
 
   useEffect(() => {
     api.auth.status().then(setAuthStatus).catch(() => {});
     api.apiKeys.get().then(keys => {
       if (keys) setForm(f => ({ ...f, twitchClientId: keys.twitchClientId || '', twitchClientSecret: keys.twitchClientSecret || '', youtubeApiKey: keys.youtubeApiKey || '' }));
     }).catch(() => {});
+    api.disk?.usage().then(setDiskUsage).catch(() => {});
     api.smtp?.get().then(s => {
       if (s) setForm(f => ({ ...f, smtpHost: s.host || '', smtpPort: s.port || 587, smtpUser: s.user || '', smtpPass: s.pass || '', smtpFromName: s.fromName || 'ClipStream' }));
     }).catch(() => {});
@@ -329,9 +338,9 @@ export default function Settings({ settings, onSave, subscription, onLogout }) {
       {tab === 'detection' && (
         <>
           <SectionCard>
-            <SectionHeader icon={Icon.folder} title="Clip Storage" subtitle="Where your clips are saved on disk" />
+            <SectionHeader icon={Icon.folder} title="Export Default Folder" subtitle="Default location for TikTok, Shorts, and Twitter exports (clips are downloaded wherever you choose)" />
             <div style={{ padding: '16px 0', borderBottom: '1px solid rgba(255,255,255,0.05)' }}>
-              <div style={{ fontSize: 14, fontWeight: 500, color: 'var(--text-primary)', marginBottom: 10 }}>Output folder</div>
+              <div style={{ fontSize: 14, fontWeight: 500, color: 'var(--text-primary)', marginBottom: 10 }}>Default export folder</div>
               <div style={{ display: 'flex', gap: 8 }}>
                 <input
                   className="sf-input"
@@ -366,9 +375,39 @@ export default function Settings({ settings, onSave, subscription, onLogout }) {
           <SectionCard>
             <SectionHeader icon={Icon.detection} title="AI Detection Sensitivity" subtitle="ClipStream learns each streamer's baseline, then clips only genuine spike moments" />
 
-            {/* Sensitivity slider */}
+            {/* Preset buttons */}
+            <div style={{ padding: '16px 0 8px', borderBottom: '1px solid rgba(255,255,255,0.05)' }}>
+              <div style={{ fontSize: 13, fontWeight: 500, color: 'var(--text-primary)', marginBottom: 12 }}>Quick Presets</div>
+              <div style={{ display: 'flex', gap: 10 }}>
+                {[
+                  { label: '🎯 Conservative', value: 20, desc: '~5–10 clips/stream · Only the biggest moments' },
+                  { label: '⚖️ Balanced',     value: 45, desc: '~10–20 clips/stream · Clear hype moments' },
+                  { label: '🔥 Aggressive',   value: 70, desc: '~20–35 clips/stream · Catches more moments' },
+                ].map(p => {
+                  const active = Math.abs(form.sensitivity - p.value) < 8;
+                  return (
+                    <button
+                      key={p.label}
+                      onClick={() => set('sensitivity', p.value)}
+                      style={{
+                        flex: 1, padding: '12px 10px', borderRadius: 10, cursor: 'pointer',
+                        fontFamily: 'var(--font-body)', textAlign: 'left',
+                        background: active ? 'linear-gradient(135deg,rgba(124,58,237,0.2),rgba(37,99,235,0.15))' : 'rgba(255,255,255,0.03)',
+                        border: active ? '1px solid rgba(124,58,237,0.4)' : '1px solid rgba(255,255,255,0.07)',
+                        transition: 'all 0.15s',
+                      }}
+                    >
+                      <div style={{ fontSize: 13, fontWeight: 700, color: active ? '#c4b5fd' : 'var(--text-primary)', marginBottom: 4 }}>{p.label}</div>
+                      <div style={{ fontSize: 11, color: 'var(--text-muted)', lineHeight: 1.4 }}>{p.desc}</div>
+                    </button>
+                  );
+                })}
+              </div>
+            </div>
+
+            {/* Fine-tune slider */}
             <SliderRow
-              label="Clip Sensitivity"
+              label="Fine Tune"
               hint={
                 form.sensitivity < 30 ? "Very selective — only clips massive, unmistakable hype moments" :
                 form.sensitivity < 55 ? "Balanced — clips clear spikes above the streamer's normal energy level" :
@@ -378,12 +417,7 @@ export default function Settings({ settings, onSave, subscription, onLogout }) {
               value={form.sensitivity}
               onChange={v => set('sensitivity', v)}
               min={0} max={100} step={5}
-              format={v => {
-                if (v < 30) return 'Selective';
-                if (v < 55) return 'Balanced';
-                if (v < 75) return 'Eager';
-                return 'Maximum';
-              }}
+              format={v => `${v}%`}
             />
 
             {/* How it works explanation */}
@@ -497,6 +531,81 @@ export default function Settings({ settings, onSave, subscription, onLogout }) {
             </div>
           </SectionCard>
 
+        </>
+      )}
+
+      {/* ── INTEGRATIONS TAB ── */}
+      {tab === 'integrations' && (
+        <>
+          {/* Discord */}
+          <SectionCard>
+            <SectionHeader
+              icon={<svg width="16" height="16" viewBox="0 0 24 24" fill="#5865F2"><path d="M20.317 4.37a19.791 19.791 0 0 0-4.885-1.515.074.074 0 0 0-.079.037c-.21.375-.444.864-.608 1.25a18.27 18.27 0 0 0-5.487 0 12.64 12.64 0 0 0-.617-1.25.077.077 0 0 0-.079-.037A19.736 19.736 0 0 0 3.677 4.37a.07.07 0 0 0-.032.027C.533 9.046-.32 13.58.099 18.057c.002.022.015.043.034.054a19.9 19.9 0 0 0 5.993 3.03.078.078 0 0 0 .084-.028c.462-.63.874-1.295 1.226-1.994a.076.076 0 0 0-.041-.106 13.107 13.107 0 0 1-1.872-.892.077.077 0 0 1-.008-.128 10.2 10.2 0 0 0 .372-.292.074.074 0 0 1 .077-.01c3.928 1.793 8.18 1.793 12.062 0a.074.074 0 0 1 .078.01c.12.098.246.198.373.292a.077.077 0 0 1-.006.127 12.299 12.299 0 0 1-1.873.892.077.077 0 0 0-.041.107c.36.698.772 1.362 1.225 1.993a.076.076 0 0 0 .084.028 19.839 19.839 0 0 0 6.002-3.03.077.077 0 0 0 .032-.054c.5-5.177-.838-9.674-3.549-13.66a.061.061 0 0 0-.031-.03z"/></svg>}
+              title="Discord"
+              subtitle="Auto-post clips to a Discord channel when they're created"
+            />
+            <div style={{ padding: '16px 0' }}>
+              <div style={{ fontSize: 12, fontWeight: 600, color: 'var(--text-muted)', textTransform: 'uppercase', letterSpacing: '0.05em', marginBottom: 8 }}>Webhook URL</div>
+              <input className="sf-input" value={form.discordWebhook} onChange={e => set('discordWebhook', e.target.value)} placeholder="https://discord.com/api/webhooks/..." />
+              <div style={{ fontSize: 11, color: 'var(--text-muted)', marginTop: 6 }}>In Discord: Channel Settings → Integrations → Webhooks → New Webhook → Copy Webhook URL</div>
+            </div>
+          </SectionCard>
+
+          {/* Generic webhook */}
+          <SectionCard>
+            <SectionHeader
+              icon={<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71"/><path d="M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71"/></svg>}
+              title="Custom Webhook"
+              subtitle="POST clip data to any URL when a clip is created (for custom integrations)"
+            />
+            <div style={{ padding: '16px 0' }}>
+              <div style={{ fontSize: 12, fontWeight: 600, color: 'var(--text-muted)', textTransform: 'uppercase', letterSpacing: '0.05em', marginBottom: 8 }}>Endpoint URL</div>
+              <input className="sf-input" value={form.webhookUrl} onChange={e => set('webhookUrl', e.target.value)} placeholder="https://your-server.com/webhook" />
+              <div style={{ fontSize: 11, color: 'var(--text-muted)', marginTop: 6 }}>Receives a POST with: event, streamer, platform, hypeScore, reason, duration, createdAt</div>
+            </div>
+          </SectionCard>
+
+          {/* App behaviour */}
+          <SectionCard>
+            <SectionHeader icon={<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><rect x="2" y="3" width="20" height="14" rx="2"/><path d="M8 21h8M12 17v4"/></svg>} title="App Behaviour" subtitle="How ClipStream runs in the background" />
+            <SettingRow label="System tray mode" hint="Keep ClipStream running in the system tray when you close the window">
+              <div style={{ display: 'flex', justifyContent: 'flex-end' }}><Toggle checked={form.systemTray} onChange={v => set('systemTray', v)} /></div>
+            </SettingRow>
+            <SettingRow label="Variable clip length" hint="Automatically extend clips during sustained hype moments (up to 3× base duration)">
+              <div style={{ display: 'flex', justifyContent: 'flex-end' }}><Toggle checked={form.variableClipLength} onChange={v => set('variableClipLength', v)} /></div>
+            </SettingRow>
+            <SettingRow label="Normalize audio on save" hint="Auto-balance clip volume to -16 LUFS when saving — consistent loudness across all clips">
+              <div style={{ display: 'flex', justifyContent: 'flex-end' }}><Toggle checked={form.normalizeAudio} onChange={v => set('normalizeAudio', v)} /></div>
+            </SettingRow>
+          </SectionCard>
+
+          {/* Disk & cleanup */}
+          <SectionCard>
+            <SectionHeader icon={Icon.folder} title="Storage & Cleanup" subtitle="Manage disk space used by ClipStream" />
+            {diskUsage && (
+              <div style={{ padding: '14px 0', borderBottom: '1px solid rgba(255,255,255,0.05)', display: 'grid', gridTemplateColumns: '1fr 1fr 1fr', gap: 12 }}>
+                {[
+                  { label: 'In Review', bytes: diskUsage.stagingBytes, color: '#a78bfa' },
+                  { label: 'Saved Clips', bytes: diskUsage.savedBytes, color: '#4ade80' },
+                  { label: 'Total', bytes: diskUsage.totalBytes, color: 'var(--text-secondary)' },
+                ].map(s => (
+                  <div key={s.label} style={{ textAlign: 'center', padding: '10px 0', background: 'rgba(255,255,255,0.03)', borderRadius: 8 }}>
+                    <div style={{ fontSize: 16, fontWeight: 800, color: s.color, fontFamily: 'var(--font-display)' }}>{(s.bytes / 1024 / 1024).toFixed(0)} MB</div>
+                    <div style={{ fontSize: 11, color: 'var(--text-muted)', marginTop: 2 }}>{s.label}</div>
+                  </div>
+                ))}
+              </div>
+            )}
+            <SettingRow label="Auto-discard old review clips" hint="Automatically remove unreviewed clips from staging after this many days (0 = never)">
+              <select className="filter-select" value={form.autoCleanupDays} onChange={e => set('autoCleanupDays', Number(e.target.value))} style={{ width: '100%' }}>
+                <option value={0}>Never</option>
+                <option value={3}>After 3 days</option>
+                <option value={7}>After 7 days</option>
+                <option value={14}>After 14 days</option>
+                <option value={30}>After 30 days</option>
+              </select>
+            </SettingRow>
+          </SectionCard>
         </>
       )}
 

@@ -23,6 +23,10 @@ contextBridge.exposeInMainWorld('clipforge', {
     list: () => ipcRenderer.invoke('clips:list'),
     open: (clipPath) => ipcRenderer.invoke('clips:open', clipPath),
     delete: (clipId) => ipcRenderer.invoke('clips:delete', clipId),
+    save: (clipId) => ipcRenderer.invoke('clips:save', clipId),
+    saveAll: () => ipcRenderer.invoke('clips:saveAll'),
+    rate: (clipId, rating) => ipcRenderer.invoke('clips:rate', { clipId, rating }),
+    export: (clipId, format, trimStart, trimEnd) => ipcRenderer.invoke('clips:export', { clipId, format, trimStart, trimEnd }),
     openFolder: () => ipcRenderer.invoke('clips:openFolder'),
     onCreate: (callback) => {
       ipcRenderer.on('clip:created', (_, data) => callback(data));
@@ -32,6 +36,28 @@ contextBridge.exposeInMainWorld('clipforge', {
       ipcRenderer.on('clip:thumbnail', (_, data) => callback(data));
       return () => ipcRenderer.removeAllListeners('clip:thumbnail');
     },
+    onUpdate: (callback) => {
+      ipcRenderer.on('clip:updated', (_, data) => callback(data));
+      return () => ipcRenderer.removeAllListeners('clip:updated');
+    },
+    onRefresh: (callback) => {
+      ipcRenderer.on('clips:refreshed', (_, data) => callback(data));
+      return () => ipcRenderer.removeAllListeners('clips:refreshed');
+    },
+  },
+
+  streamerSettings: {
+    get: (streamerId) => ipcRenderer.invoke('streamerSettings:get', streamerId),
+    set: (streamerId, settings) => ipcRenderer.invoke('streamerSettings:set', { streamerId, settings }),
+  },
+
+  disk: {
+    usage: () => ipcRenderer.invoke('disk:usage'),
+  },
+
+  onNavigate: (callback) => {
+    ipcRenderer.on('navigate', (_, page) => callback(page));
+    return () => ipcRenderer.removeAllListeners('navigate');
   },
 
   // Search
