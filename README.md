@@ -1,6 +1,6 @@
-# 🎬 ClipForge — AI-Powered Stream Clipper
+# 🎬 ClipStream — AI-Powered Stream Clipper
 
-**ClipForge** is a desktop app that automatically monitors Twitch, YouTube Live, and Kick streams, detects hype moments using AI (audio + chat analysis), and saves clips directly to a `Raw Clips` folder on your computer.
+**ClipStream** is a desktop app that automatically monitors Twitch, YouTube Live, and Kick streams, detects hype moments using AI (audio + chat analysis), and saves clips directly to a `Raw Clips` folder on your computer.
 
 **Subscription:** $49.99/month
 
@@ -10,7 +10,7 @@
 
 ### Prerequisites
 
-Install these tools on your computer before running ClipForge:
+Install these tools on your computer before running ClipStream:
 
 1. **Node.js 18+** — https://nodejs.org
 2. **FFmpeg** — https://ffmpeg.org/download.html
@@ -23,7 +23,7 @@ Install these tools on your computer before running ClipForge:
 ### Install & Run (Development)
 
 ```bash
-cd ClipForge
+cd ClipStream
 npm install
 npm run dev
 ```
@@ -47,7 +47,7 @@ Built installers will appear in `dist-electron/`.
 
 ## API Key Setup
 
-ClipForge requires API keys to search and monitor streams. All keys are stored **locally on your machine only**.
+ClipStream requires API keys to search and monitor streams. All keys are stored **locally on your machine only**.
 
 ### Twitch (Required for Twitch features)
 
@@ -55,7 +55,7 @@ ClipForge requires API keys to search and monitor streams. All keys are stored *
 2. Click **Register Your Application**
 3. Set **OAuth Redirect URL** to `http://localhost`
 4. Copy your **Client ID** and **Client Secret**
-5. Paste both into ClipForge → **Settings → API Keys**
+5. Paste both into ClipStream → **Settings → API Keys**
 
 ### YouTube (Required for YouTube features)
 
@@ -63,7 +63,7 @@ ClipForge requires API keys to search and monitor streams. All keys are stored *
 2. Create a new project (or use an existing one)
 3. Enable the **YouTube Data API v3**
 4. Go to **Credentials → Create API Key**
-5. Paste it into ClipForge → **Settings → API Keys**
+5. Paste it into ClipStream → **Settings → API Keys**
 
 ### Kick (No key required)
 
@@ -73,7 +73,7 @@ Kick works out of the box — no API key needed.
 
 ## Subscription & Payments
 
-ClipForge uses Stripe for subscription management.
+ClipStream uses Stripe for subscription management.
 
 ### Setting Up Stripe (for Developers/Operators)
 
@@ -94,14 +94,14 @@ During development, use Stripe test card: `4242 4242 4242 4242` with any future 
 
 ## How the AI Clipper Works
 
-ClipForge detects "hype moments" by combining two signals:
+ClipStream detects "hype moments" by combining two signals:
 
 | Signal | How it works | Default threshold |
 |--------|-------------|-------------------|
 | **Audio Spike** | FFmpeg analyzes live audio levels from the stream | > -20 dB |
 | **Chat Explosion** | IRC/WebSocket monitors messages per second | > 15 msg/s |
 
-When **both** signals spike simultaneously, ClipForge:
+When **both** signals spike simultaneously, ClipStream:
 1. Captures the stream via Streamlink → FFmpeg
 2. Records a clip of the configured duration (default: 60s)
 3. Generates a thumbnail
@@ -115,7 +115,7 @@ You can tune both thresholds in **Settings → Clip Detection**.
 ## Project Structure
 
 ```
-ClipForge/
+ClipStream/
 ├── main.js              # Electron main process (stream capture, IPC)
 ├── preload.js           # Secure bridge between main ↔ renderer
 ├── index.html           # App HTML entry point
