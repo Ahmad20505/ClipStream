@@ -8,6 +8,37 @@ const os = require('os');
 // When packaged with asar, ffmpeg-static is unpacked — fix the path so the OS can execute it.
 const ffmpegPath = require('ffmpeg-static').replace('app.asar', 'app.asar.unpacked');
 
+// ─── ClipStream sender email ──────────────────────────────────────────────────
+// Loaded from config/sender.js (not committed to GitHub).
+// All outgoing emails — receipts, daily digest, welcome — use this account.
+// Emails are sent TO the address the user signed up with automatically.
+let SENDER = { host: '', port: 587, user: '', pass: '', fromName: 'ClipStream' };
+try {
+  SENDER = require('./config/sender.js');
+} catch (e) {
+  // config/sender.js not set up yet — email features will be disabled until configured
+}
+
+function senderReady() {
+  return !!(SENDER.host && SENDER.user && SENDER.pass);
+}
+
+async function createTransporter() {
+  const nodemailer = require('nodemailer');
+  return nodemailer.createTransport({
+    host: SENDER.host,
+    port: Number(SENDER.port) || 587,
+    secure: Number(SENDER.port) === 465,
+    auth: { user: SENDER.user, pass: SENDER.pass },
+  });
+}
+
+function getUserEmail() {
+  // Always send to the address the user registered with
+  const account = store?.get('account', {});
+  return account.email || null;
+}
+
 // ─── Auto Updater ────────────────────────────────────────────────────────────
 const { autoUpdater } = require('electron-updater');
 
@@ -1826,6 +1857,34 @@ ipcMain.handle('smtp:set', async (event, cfg) => {
   return { success: true };
 });
 
+// ─── Persistent credentials file ─────────────────────────────────────────────
+// Stored in the user's HOME directory so it survives app deletion + reinstalls.
+// ~/.clipstream-credentials on Mac/Linux, %USERPROFILE%\.clipstream-credentials on Windows
+const CRED_FILE = path.join(os.homedir(), '.clipstream-credentials');
+
+function saveCredentialsToDisk(email, passwordHash) {
+  try {
+    const data = JSON.stringify({ email, passwordHash, savedAt: Date.now() });
+    fs.writeFileSync(CRED_FILE, data, { encoding: 'utf8', mode: 0o600 });
+  } catch (e) {
+    console.error('[ClipStream] Could not save credentials to disk:', e.message);
+  }
+}
+
+function loadCredentialsFromDisk() {
+  try {
+    if (!fs.existsSync(CRED_FILE)) return null;
+    const raw = fs.readFileSync(CRED_FILE, 'utf8');
+    return JSON.parse(raw);
+  } catch (e) {
+    return null;
+  }
+}
+
+function deleteCredentialsFromDisk() {
+  try { if (fs.existsSync(CRED_FILE)) fs.unlinkSync(CRED_FILE); } catch {}
+}
+
 // ─── Auth IPC ────────────────────────────────────────────────────────────────
 ipcMain.handle('auth:register', async (event, { email, password }) => {
   try {
@@ -1833,6 +1892,10 @@ ipcMain.handle('auth:register', async (event, { email, password }) => {
     const passwordHash = crypto.createHash('sha256').update(password).digest('hex');
     store.set('account', { email, passwordHash, createdAt: Date.now() });
     store.set('auth.loggedIn', true);
+    // Persist to home directory so login survives reinstalls
+    saveCredentialsToDisk(email, passwordHash);
+    // Send welcome email automatically
+    sendWelcomeEmail(email).catch(() => {});
     return { success: true, email };
   } catch (err) {
     return { success: false, error: err.message };
@@ -1854,6 +1917,8 @@ ipcMain.handle('auth:login', async (event, { email, password }) => {
       return { success: false, error: 'Invalid email or password.' };
     }
     store.set('auth.loggedIn', true);
+    // Persist to home directory so login survives reinstalls
+    saveCredentialsToDisk(account.email, account.passwordHash);
     return { success: true, email: account.email };
   } catch (err) {
     return { success: false, error: err.message };
@@ -1862,29 +1927,42 @@ ipcMain.handle('auth:login', async (event, { email, password }) => {
 
 ipcMain.handle('auth:logout', async () => {
   store.set('auth.loggedIn', false);
+  // Remove persistent credentials so the user is fully signed out
+  deleteCredentialsFromDisk();
   return { success: true };
 });
 
 ipcMain.handle('auth:status', async () => {
-  const account = store.get('account');
-  const loggedIn = store.get('auth.loggedIn', false);
+  let account = store.get('account');
+  let loggedIn = store.get('auth.loggedIn', false);
+
+  // If store has no account (e.g. after reinstall), try restoring from home directory
+  if (!account || !account.email) {
+    const saved = loadCredentialsFromDisk();
+    if (saved && saved.email && saved.passwordHash) {
+      console.log('[ClipStream] Restoring account from persistent credentials:', saved.email);
+      account = { email: saved.email, passwordHash: saved.passwordHash, createdAt: saved.savedAt };
+      store.set('account', account);
+      store.set('auth.loggedIn', true);
+      loggedIn = true;
+    }
+  }
+
+  // If account exists in store but not on disk yet, backfill the disk file
+  if (account && account.email && !fs.existsSync(CRED_FILE)) {
+    saveCredentialsToDisk(account.email, account.passwordHash);
+  }
+
   if (!account || !account.email) return { hasAccount: false, loggedIn: false };
   return { hasAccount: true, loggedIn, email: account.email };
 });
 
 // ─── Email Receipt ────────────────────────────────────────────────────────────
 async function sendReceiptEmail(email, amount, nextBillingDate, isRenewal = false) {
-  const smtp = store.get('smtp', {});
-  if (!smtp.host || !smtp.user || !smtp.pass) return; // SMTP not configured
+  if (!senderReady()) return; // ClipStream sender email not configured yet
 
   try {
-    const nodemailer = require('nodemailer');
-    const transporter = nodemailer.createTransport({
-      host: smtp.host,
-      port: Number(smtp.port) || 587,
-      secure: Number(smtp.port) === 465,
-      auth: { user: smtp.user, pass: smtp.pass },
-    });
+    const transporter = await createTransporter();
 
     const subject = isRenewal
       ? '🎬 ClipStream — Monthly Renewal Confirmed'
@@ -1961,7 +2039,7 @@ async function sendReceiptEmail(email, amount, nextBillingDate, isRenewal = fals
     `;
 
     await transporter.sendMail({
-      from: `"${smtp.fromName || 'ClipStream'}" <${smtp.user}>`,
+      from: `"${SENDER.fromName || 'ClipStream'}" <${SENDER.user}>`,
       to: email,
       subject,
       html,
@@ -2008,11 +2086,9 @@ function scheduleDailyDigest() {
     const now = new Date();
     if (now.getHours() !== 8 || now.getMinutes() > 5) return; // only fire ~8:00 AM
 
-    const smtp = store.get('smtp', {});
-    if (!smtp.host || !smtp.user) return; // no SMTP configured
+    if (!senderReady()) return; // ClipStream sender not configured
 
-    const account = store.get('account', {});
-    const email = account.email;
+    const email = getUserEmail();
     if (!email) return;
 
     const lastDigest = store.get('lastDigestSent', 0);
@@ -2026,7 +2102,7 @@ function scheduleDailyDigest() {
     if (yesterdayClips.length === 0) return;
 
     store.set('lastDigestSent', Date.now());
-    sendDailyDigest(email, yesterdayClips, smtp);
+    sendDailyDigest(email, yesterdayClips);
   };
 
   // Check every 5 minutes
@@ -2034,13 +2110,9 @@ function scheduleDailyDigest() {
   checkDigest();
 }
 
-async function sendDailyDigest(toEmail, clips, smtp) {
+async function sendDailyDigest(toEmail, clips) {
   try {
-    const nodemailer = require('nodemailer');
-    const transporter = nodemailer.createTransport({
-      host: smtp.host, port: smtp.port || 587, secure: smtp.port === 465,
-      auth: { user: smtp.user, pass: smtp.pass },
-    });
+    const transporter = await createTransporter();
 
     const totalClips  = clips.length;
     const avgHype     = Math.round(clips.reduce((s, c) => s + (c.hypeScore ?? 0), 0) / totalClips);
@@ -2057,7 +2129,7 @@ async function sendDailyDigest(toEmail, clips, smtp) {
     `).join('');
 
     await transporter.sendMail({
-      from: `"${smtp.fromName || 'ClipStream'}" <${smtp.user}>`,
+      from: `"${SENDER.fromName || 'ClipStream'}" <${SENDER.user}>`,
       to: toEmail,
       subject: `🎬 ClipStream Daily Digest — ${totalClips} clip${totalClips !== 1 ? 's' : ''} from ${date}`,
       html: `
@@ -2102,6 +2174,46 @@ async function sendDailyDigest(toEmail, clips, smtp) {
     console.log(`[ClipStream] Daily digest sent to ${toEmail} — ${totalClips} clips`);
   } catch (e) {
     console.error('[ClipStream] Daily digest error:', e.message);
+  }
+}
+
+// ─── Welcome Email ────────────────────────────────────────────────────────────
+async function sendWelcomeEmail(toEmail) {
+  if (!senderReady()) return;
+  try {
+    const transporter = await createTransporter();
+    await transporter.sendMail({
+      from: `"${SENDER.fromName || 'ClipStream'}" <${SENDER.user}>`,
+      to: toEmail,
+      subject: '🎬 Welcome to ClipStream — You\'re all set!',
+      html: `
+        <div style="background:#0a0a0f;padding:32px;font-family:sans-serif;max-width:520px;margin:0 auto;">
+          <div style="background:linear-gradient(135deg,#7c3aed,#2563eb);padding:24px;border-radius:12px;text-align:center;margin-bottom:24px;">
+            <h1 style="color:white;margin:0;font-size:24px;font-weight:800;">Welcome to ClipStream! 🎬</h1>
+          </div>
+          <p style="color:#c4b5fd;font-size:16px;font-weight:600;margin:0 0 8px;">Hey ${toEmail.split('@')[0]},</p>
+          <p style="color:#9ca3af;font-size:14px;line-height:1.7;margin:0 0 20px;">
+            You're now set up on ClipStream — the only fully automatic AI stream clipper on the market.
+            ClipStream monitors your favorite streamers 24/7 and saves the best moments automatically.
+          </p>
+          <div style="background:#13141f;border:1px solid rgba(255,255,255,0.08);border-radius:10px;padding:20px;margin-bottom:20px;">
+            <p style="color:#a78bfa;font-size:13px;font-weight:700;margin:0 0 12px;text-transform:uppercase;letter-spacing:0.05em;">Getting started</p>
+            <p style="color:#9ca3af;font-size:13px;line-height:1.6;margin:0;">
+              1. Click <strong style="color:#c4b5fd;">Find Streamers</strong> in the sidebar<br>
+              2. Search for a streamer on Twitch, YouTube, or Kick<br>
+              3. Click <strong style="color:#c4b5fd;">Add & Monitor</strong> — ClipStream takes it from there<br>
+              4. Clips land in your <strong style="color:#c4b5fd;">Clip Gallery</strong> for you to review and download
+            </p>
+          </div>
+          <p style="color:#6b7280;font-size:12px;text-align:center;margin:0;">
+            ClipStream AI · Questions? Reply to this email
+          </p>
+        </div>
+      `,
+    });
+    console.log('[ClipStream] Welcome email sent to', toEmail);
+  } catch (e) {
+    console.error('[ClipStream] Welcome email error:', e.message);
   }
 }
 

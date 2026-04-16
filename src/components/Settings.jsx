@@ -144,7 +144,7 @@ const TABS = [
   { id: 'detection',    label: 'Detection',     icon: Icon.detection },
   { id: 'integrations', label: 'Integrations',  icon: <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71"/><path d="M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71"/></svg> },
   { id: 'api',          label: 'API Keys',      icon: Icon.api },
-  { id: 'receipts',     label: 'Receipts',      icon: Icon.mail },
+  { id: 'receipts',     label: 'Emails',        icon: Icon.mail },
 ];
 
 // ── Main Component ────────────────────────────────────────────────────────────
@@ -609,42 +609,31 @@ export default function Settings({ settings, onSave, subscription, onLogout }) {
         </>
       )}
 
-      {/* ── RECEIPTS TAB ── */}
+      {/* ── EMAILS TAB ── */}
       {tab === 'receipts' && (
         <>
-          <div style={{ padding: '12px 16px', background: 'rgba(37,99,235,0.08)', border: '1px solid rgba(37,99,235,0.2)', borderRadius: 10, marginBottom: 16, fontSize: 13, color: '#93c5fd', lineHeight: 1.5 }}>
-            📧 ClipStream will automatically email you a receipt every time your subscription renews. Fill in your SMTP details below to enable this.
-          </div>
           <SectionCard>
-            <SectionHeader icon={Icon.mail} title="SMTP Configuration" subtitle="Used to send your monthly renewal receipts" />
-            <div style={{ padding: '16px 0', borderBottom: '1px solid rgba(255,255,255,0.05)' }}>
-              <div style={{ display: 'grid', gridTemplateColumns: '1fr 120px', gap: 10 }}>
-                <div>
-                  <div style={{ fontSize: 12, fontWeight: 600, color: 'var(--text-muted)', textTransform: 'uppercase', letterSpacing: '0.05em', marginBottom: 8 }}>SMTP Host</div>
-                  <input className="sf-input" value={form.smtpHost} onChange={e => set('smtpHost', e.target.value)} placeholder="smtp.gmail.com" />
-                </div>
-                <div>
-                  <div style={{ fontSize: 12, fontWeight: 600, color: 'var(--text-muted)', textTransform: 'uppercase', letterSpacing: '0.05em', marginBottom: 8 }}>Port</div>
-                  <input className="sf-input" type="number" value={form.smtpPort} onChange={e => set('smtpPort', parseInt(e.target.value))} />
-                </div>
-              </div>
-            </div>
-            <div style={{ padding: '16px 0', borderBottom: '1px solid rgba(255,255,255,0.05)' }}>
-              <div style={{ fontSize: 12, fontWeight: 600, color: 'var(--text-muted)', textTransform: 'uppercase', letterSpacing: '0.05em', marginBottom: 8 }}>Username / Email</div>
-              <input className="sf-input" value={form.smtpUser} onChange={e => set('smtpUser', e.target.value)} placeholder="you@gmail.com" />
-            </div>
-            <div style={{ padding: '16px 0', borderBottom: '1px solid rgba(255,255,255,0.05)' }}>
-              <div style={{ fontSize: 12, fontWeight: 600, color: 'var(--text-muted)', textTransform: 'uppercase', letterSpacing: '0.05em', marginBottom: 8 }}>Password / App Password</div>
-              <PasswordInput value={form.smtpPass} onChange={e => set('smtpPass', e.target.value)} placeholder="App password (not your main password)" />
-            </div>
+            <SectionHeader icon={Icon.mail} title="Automatic Emails" subtitle="ClipStream emails you automatically — no setup needed" />
             <div style={{ padding: '16px 0' }}>
-              <div style={{ fontSize: 12, fontWeight: 600, color: 'var(--text-muted)', textTransform: 'uppercase', letterSpacing: '0.05em', marginBottom: 8 }}>Sender Name</div>
-              <input className="sf-input" value={form.smtpFromName} onChange={e => set('smtpFromName', e.target.value)} placeholder="ClipStream" />
+              {[
+                { icon: '👋', label: 'Welcome email', desc: 'Sent instantly when you create your account' },
+                { icon: '🧾', label: 'Renewal receipts', desc: 'Sent automatically each time your subscription renews' },
+                { icon: '🎬', label: 'Daily clip digest', desc: 'Sent every morning at 8 AM with yesterday\'s highlights' },
+              ].map((item, i, arr) => (
+                <div key={i} style={{ display: 'flex', gap: 14, alignItems: 'flex-start', padding: '14px 0', borderBottom: i < arr.length - 1 ? '1px solid rgba(255,255,255,0.05)' : 'none' }}>
+                  <span style={{ fontSize: 20, flexShrink: 0, marginTop: 2 }}>{item.icon}</span>
+                  <div>
+                    <div style={{ fontSize: 14, fontWeight: 600, color: 'var(--text-primary)', marginBottom: 3 }}>{item.label}</div>
+                    <div style={{ fontSize: 12, color: 'var(--text-muted)' }}>{item.desc}</div>
+                  </div>
+                  <span style={{ marginLeft: 'auto', fontSize: 11, fontWeight: 700, color: '#4ade80', background: 'rgba(34,197,94,0.1)', border: '1px solid rgba(34,197,94,0.25)', borderRadius: 6, padding: '3px 8px', flexShrink: 0 }}>Auto</span>
+                </div>
+              ))}
             </div>
           </SectionCard>
 
-          <div style={{ padding: '14px 18px', background: 'rgba(255,255,255,0.03)', border: '1px solid rgba(255,255,255,0.07)', borderRadius: 10, fontSize: 12, color: 'var(--text-muted)', lineHeight: 1.6 }}>
-            <strong style={{ color: 'var(--text-secondary)' }}>Using Gmail?</strong> Go to your Google Account → Security → 2-Step Verification → App Passwords. Generate one for "ClipStream" and use it here instead of your regular password.
+          <div style={{ padding: '14px 18px', background: 'rgba(124,58,237,0.07)', border: '1px solid rgba(124,58,237,0.2)', borderRadius: 10, fontSize: 13, color: '#a78bfa', lineHeight: 1.6 }}>
+            📬 All emails are sent to <strong>{authStatus?.email || 'your registered email'}</strong> — the address you signed up with. No configuration needed.
           </div>
         </>
       )}
