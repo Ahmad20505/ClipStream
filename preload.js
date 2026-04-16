@@ -97,6 +97,7 @@ contextBridge.exposeInMainWorld('clipforge', {
     login: (data) => ipcRenderer.invoke('auth:login', data),
     logout: () => ipcRenderer.invoke('auth:logout'),
     status: () => ipcRenderer.invoke('auth:status'),
+    deleteAccount: () => ipcRenderer.invoke('auth:deleteAccount'),
   },
 
   // Window controls (custom titlebar)

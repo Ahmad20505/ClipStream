@@ -33,7 +33,8 @@
       "preload.js",
       "assets/icon.png",
       "assets/icon.ico",
-      "assets/icon.icns"
+      "assets/icon.icns",
+      "!config/**"
     ],
     "publish": {
       "provider": "github",

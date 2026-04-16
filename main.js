@@ -1,7 +1,8 @@
-const { app, BrowserWindow, ipcMain, dialog, shell, Notification, net, protocol, Tray, Menu, nativeImage } = require('electron');
+const { app, BrowserWindow, ipcMain, dialog, shell, Notification, net, protocol, Tray, Menu, nativeImage, safeStorage } = require('electron');
 const path = require('path');
 const fs = require('fs');
-const { spawn, exec } = require('child_process');
+const crypto = require('crypto');
+const { spawn, exec, execFile } = require('child_process');
 const os = require('os');
 
 // ─── Bundled ffmpeg binary (no install needed) ───────────────────────────────
@@ -151,7 +152,8 @@ function createWindow() {
       preload: path.join(__dirname, 'preload.js'),
       contextIsolation: true,
       nodeIntegration: false,
-      webSecurity: false, // allows file:// URLs — safe for local-only desktop app
+      sandbox: false, // preload.js uses Node APIs; keep sandbox off but contextIsolation on
+      devTools: !app.isPackaged, // no DevTools in shipped builds — reduces renderer attack surface
     },
     icon: path.join(__dirname, 'assets', 'icon.png'),
   });
@@ -173,6 +175,25 @@ protocol.registerSchemesAsPrivileged([
   { scheme: 'clipfile', privileges: { secure: true, supportFetchAPI: true, stream: true } },
 ]);
 
+// Path-jail for clipfile:// — resolved path must live under one of these roots,
+// otherwise a malicious/XSS'd renderer could read arbitrary files (SSH keys, .env, …).
+function isClipFilePathAllowed(filePath) {
+  const resolved = path.resolve(filePath);
+  const settingsOutputDir = (store && store.get('settings.outputDir')) || path.join(os.homedir(), 'Raw Clips');
+  const roots = [
+    path.resolve(app.getPath('userData'), 'staging'),
+    path.resolve(app.getPath('userData'), 'thumbnails'),
+    path.resolve(settingsOutputDir),
+  ];
+  const ci = process.platform === 'darwin' || process.platform === 'win32';
+  const norm = (p) => (ci ? p.toLowerCase() : p);
+  const target = norm(resolved);
+  return roots.some((r) => {
+    const root = norm(r);
+    return target === root || target.startsWith(root + path.sep);
+  });
+}
+
 app.whenReady().then(async () => {
   // Handle clipfile:// requests by serving the local file
   protocol.handle('clipfile', async (request) => {
@@ -180,6 +201,11 @@ app.whenReady().then(async () => {
       // Decode path segments individually so spaces and special chars work
       const rawPath = request.url.slice('clipfile://'.length);
       const filePath = rawPath.split('/').map(seg => decodeURIComponent(seg)).join('/');
+
+      if (!isClipFilePathAllowed(filePath)) {
+        console.error('[ClipStream] clipfile: path not allowed:', filePath);
+        return new Response('Forbidden', { status: 403 });
+      }
 
       if (!fs.existsSync(filePath)) {
         console.error('[ClipStream] clipfile: file not found:', filePath);
@@ -494,6 +520,13 @@ app.on('window-all-closed', () => {
   }
   stopAllMonitors();
   if (process.platform !== 'darwin') app.quit();
+});
+
+// Ensure streamlink / ffmpeg children don't orphan when the app quits while the
+// tray is holding it alive (window-all-closed returns early in that case, so
+// we need a separate hook on the actual quit path).
+app.on('before-quit', () => {
+  try { stopAllMonitors(); } catch (e) { console.error('[ClipStream] stopAllMonitors on quit:', e.message); }
 });
 
 // ─── Output Directory ────────────────────────────────────────────────────────
@@ -1386,11 +1419,42 @@ async function captureClip(session, settings, hypeScore = 0.5, reason = 'both', 
 }
 
 // ─── Webhooks ────────────────────────────────────────────────────────────────
+// Reject webhook URLs pointing at private / loopback / link-local addresses —
+// otherwise a malicious settings import could aim them at cloud-metadata endpoints,
+// local admin panels, Redis, etc. (SSRF). DNS rebinding is still theoretically
+// possible; a public allowlist would be stricter but too user-hostile.
+function isSafeWebhookUrl(urlStr) {
+  let u;
+  try { u = new URL(urlStr); } catch { return false; }
+  if (u.protocol !== 'http:' && u.protocol !== 'https:') return false;
+  const host = u.hostname.toLowerCase();
+  if (!host) return false;
+  if (host === 'localhost' || host === 'ip6-localhost' || host.endsWith('.localhost')) return false;
+  const v4 = host.match(/^(\d+)\.(\d+)\.(\d+)\.(\d+)$/);
+  if (v4) {
+    const [a, b] = [Number(v4[1]), Number(v4[2])];
+    if (a === 0 || a === 10 || a === 127) return false;
+    if (a === 169 && b === 254) return false;           // cloud-metadata / link-local
+    if (a === 172 && b >= 16 && b <= 31) return false;
+    if (a === 192 && b === 168) return false;
+    return true;
+  }
+  if (host.includes(':')) {
+    if (host === '::1' || host === '::' || host === '0:0:0:0:0:0:0:1') return false;
+    // fc00::/7 (unique-local), fe80::/10 (link-local)
+    if (/^f[cd]/.test(host) || /^fe[89ab]/.test(host)) return false;
+    return true;
+  }
+  return true;
+}
+
 async function fireWebhooks(clip, settings) {
   const { default: nodeFetch } = await import('node-fetch');
 
   // Discord webhook
-  if (settings.discordWebhook) {
+  if (settings.discordWebhook && !isSafeWebhookUrl(settings.discordWebhook)) {
+    console.warn('[ClipStream] Discord webhook blocked (unsafe URL):', settings.discordWebhook);
+  } else if (settings.discordWebhook) {
     try {
       const score = clip.hypeScore ?? 0;
       const emoji = score >= 80 ? '🔥' : score >= 60 ? '⚡' : '🎬';
@@ -1415,7 +1479,9 @@ async function fireWebhooks(clip, settings) {
   }
 
   // Generic webhook
-  if (settings.webhookUrl) {
+  if (settings.webhookUrl && !isSafeWebhookUrl(settings.webhookUrl)) {
+    console.warn('[ClipStream] Generic webhook blocked (unsafe URL):', settings.webhookUrl);
+  } else if (settings.webhookUrl) {
     try {
       await nodeFetch(settings.webhookUrl, {
         method: 'POST',
@@ -1444,7 +1510,7 @@ function generateThumbnail(videoPath, clipData) {
   // Store thumbnails in app userData — NOT in the user's clips folder
   const thumbFilename = `${clipData.id}.jpg`;
   const thumbPath = path.join(thumbnailsDir(), thumbFilename);
-  exec(`"${ffmpegPath}" -i "${videoPath}" -ss 00:00:02 -vframes 1 -q:v 2 "${thumbPath}" -y`, (err) => {
+  execFile(ffmpegPath, ['-y', '-i', videoPath, '-ss', '00:00:02', '-vframes', '1', '-q:v', '2', thumbPath], (err) => {
     if (!err && fs.existsSync(thumbPath)) {
       const clips = store.get('recentClips', []);
       const idx = clips.findIndex(c => c.id === clipData.id);
@@ -1665,9 +1731,42 @@ ipcMain.handle('clips:export', async (event, { clipId, format, trimStart, trimEn
 // clips:trim is handled by clips:export with format='trim' — no separate handler needed
 
 // ─── Settings IPC ────────────────────────────────────────────────────────────
+// Whitelist + coerce every settings field so a compromised renderer can't stuff
+// unknown keys into the store, break the detector with absurd thresholds, or
+// replace outputDir with a non-string that crashes path.join.
+const QUALITY_ENUM = new Set(['best', 'worst', 'high', 'medium', 'low', '1080p', '720p', '480p', '360p', 'audio_only']);
+function sanitizeSettings(input) {
+  const s = (input && typeof input === 'object') ? input : {};
+  const existing = store.get('settings') || {};
+  const num = (v, min, max, def) => {
+    const n = Number(v);
+    if (!Number.isFinite(n)) return def;
+    return Math.max(min, Math.min(max, n));
+  };
+  const bool = (v, def) => typeof v === 'boolean' ? v : def;
+  const str = (v, max, def = '') => typeof v === 'string' ? v.slice(0, max) : def;
+  return {
+    outputDir:          (typeof s.outputDir === 'string' && s.outputDir.length > 0) ? s.outputDir : existing.outputDir,
+    clipBuffer:         num(s.clipBuffer, 0, 300, existing.clipBuffer),
+    clipDuration:       num(s.clipDuration, 5, 600, existing.clipDuration),
+    audioThreshold:     num(s.audioThreshold, -100, 0, existing.audioThreshold),
+    chatThreshold:      num(s.chatThreshold, 0, 1000, existing.chatThreshold),
+    sensitivity:        num(s.sensitivity, 0, 100, existing.sensitivity),
+    autoStart:          bool(s.autoStart, existing.autoStart),
+    notifications:      bool(s.notifications, existing.notifications),
+    quality:            QUALITY_ENUM.has(s.quality) ? s.quality : existing.quality,
+    discordWebhook:     str(s.discordWebhook, 500, existing.discordWebhook),
+    webhookUrl:         str(s.webhookUrl, 500, existing.webhookUrl),
+    normalizeAudio:     bool(s.normalizeAudio, existing.normalizeAudio),
+    autoCleanupDays:    num(s.autoCleanupDays, 0, 365, existing.autoCleanupDays),
+    systemTray:         bool(s.systemTray, existing.systemTray),
+    variableClipLength: bool(s.variableClipLength, existing.variableClipLength),
+  };
+}
+
 ipcMain.handle('settings:get', async () => store.get('settings'));
 ipcMain.handle('settings:set', async (event, settings) => {
-  store.set('settings', settings);
+  store.set('settings', sanitizeSettings(settings));
   ensureOutputDir();
   return { success: true };
 });
@@ -1679,11 +1778,15 @@ ipcMain.handle('apikeys:get', async () => {
 });
 
 ipcMain.handle('apikeys:set', async (event, keys) => {
+  const k = (keys && typeof keys === 'object') ? keys : {};
+  const str = (v, max = 200) => typeof v === 'string' ? v.slice(0, max) : '';
   const existing = store.get('apiKeys');
   store.set('apiKeys', {
-    ...existing,
-    ...keys,
-    twitchClientSecret: keys.twitchClientSecret === '••••••••' ? existing.twitchClientSecret : keys.twitchClientSecret,
+    twitchClientId:       k.twitchClientId       !== undefined ? str(k.twitchClientId)       : existing.twitchClientId,
+    twitchClientSecret:   k.twitchClientSecret === '••••••••' ? existing.twitchClientSecret
+                         : k.twitchClientSecret !== undefined ? str(k.twitchClientSecret)   : existing.twitchClientSecret,
+    youtubeApiKey:        k.youtubeApiKey        !== undefined ? str(k.youtubeApiKey)        : existing.youtubeApiKey,
+    stripePublishableKey: k.stripePublishableKey !== undefined ? str(k.stripePublishableKey) : existing.stripePublishableKey,
   });
   return { success: true };
 });
@@ -1701,16 +1804,28 @@ ipcMain.handle('settings:selectDir', async () => {
 });
 
 // ─── Subscription IPC ────────────────────────────────────────────────────────
+// NOTE: this handler is a client-only trust boundary and is fundamentally
+// bypassable — a user can edit electron-store's JSON by hand to flip `active`.
+// Real entitlement enforcement requires a backend that verifies a signed Stripe
+// receipt; the shape-validation below is just defensive tidying, not security.
 ipcMain.handle('subscription:get', async () => store.get('subscription'));
 ipcMain.handle('subscription:set', async (event, sub) => {
-  store.set('subscription', sub);
+  const s = (sub && typeof sub === 'object') ? sub : {};
+  const existing = store.get('subscription') || {};
+  const active = typeof s.active === 'boolean' ? s.active : existing.active;
+  const plan = typeof s.plan === 'string' ? s.plan.slice(0, 100) : existing.plan;
+  const expiresAt = Number.isFinite(Number(s.expiresAt)) ? Number(s.expiresAt) : existing.expiresAt;
+  const customerId = typeof s.customerId === 'string' ? s.customerId.slice(0, 200) : existing.customerId;
+  const email = typeof s.email === 'string' ? s.email.slice(0, 200) : undefined;
+  const normalized = { active, plan, expiresAt, customerId };
+  store.set('subscription', normalized);
 
   // Send welcome receipt if this is a paid activation
-  if (sub.active && sub.plan !== 'promo_free' && sub.email) {
-    const nextDate = new Date(sub.expiresAt + 30 * 24 * 60 * 60 * 1000).toLocaleDateString('en-US', {
+  if (active && plan !== 'promo_free' && email && expiresAt) {
+    const nextDate = new Date(expiresAt + 30 * 24 * 60 * 60 * 1000).toLocaleDateString('en-US', {
       year: 'numeric', month: 'long', day: 'numeric',
     });
-    sendReceiptEmail(sub.email, '49.99', nextDate, false);
+    sendReceiptEmail(email, '49.99', nextDate, false);
   }
 
   return { success: true };
@@ -1848,35 +1963,104 @@ ipcMain.handle('smtp:get', async () => {
   return { ...s, pass: s.pass ? '••••••••' : '' }; // mask password
 });
 ipcMain.handle('smtp:set', async (event, cfg) => {
+  const c = (cfg && typeof cfg === 'object') ? cfg : {};
+  const str = (v, max = 200) => typeof v === 'string' ? v.slice(0, max) : '';
   const existing = store.get('smtp', {});
+  const port = Number(c.port);
   store.set('smtp', {
-    ...existing,
-    ...cfg,
-    pass: cfg.pass === '••••••••' ? existing.pass : cfg.pass,
+    host:     c.host     !== undefined ? str(c.host)     : existing.host,
+    port:     Number.isFinite(port) && port > 0 && port < 65536 ? port : (existing.port || 587),
+    user:     c.user     !== undefined ? str(c.user)     : existing.user,
+    pass:     c.pass === '••••••••' ? existing.pass
+             : c.pass !== undefined ? str(c.pass) : existing.pass,
+    fromName: c.fromName !== undefined ? str(c.fromName, 100) : (existing.fromName || 'ClipStream'),
   });
   return { success: true };
 });
 
+// ─── Password hashing (scrypt) ────────────────────────────────────────────────
+// Stored format: "scrypt:<saltHex>:<keyHex>". Legacy SHA-256 hashes (bare 64-char
+// hex) are still verifiable for migration and are upgraded to scrypt on first
+// successful login.
+const SCRYPT_N = 16384, SCRYPT_R = 8, SCRYPT_P = 1, SCRYPT_KEYLEN = 64;
+
+function hashPassword(password) {
+  return new Promise((resolve, reject) => {
+    const salt = crypto.randomBytes(16);
+    crypto.scrypt(password, salt, SCRYPT_KEYLEN, { N: SCRYPT_N, r: SCRYPT_R, p: SCRYPT_P, maxmem: 64 * 1024 * 1024 }, (err, key) => {
+      if (err) return reject(err);
+      resolve(`scrypt:${salt.toString('hex')}:${key.toString('hex')}`);
+    });
+  });
+}
+
+function verifyPassword(password, stored) {
+  return new Promise((resolve) => {
+    if (!stored || typeof stored !== 'string') return resolve(false);
+    if (stored.startsWith('scrypt:')) {
+      const parts = stored.split(':');
+      if (parts.length !== 3) return resolve(false);
+      let salt, expected;
+      try {
+        salt = Buffer.from(parts[1], 'hex');
+        expected = Buffer.from(parts[2], 'hex');
+      } catch { return resolve(false); }
+      crypto.scrypt(password, salt, expected.length, { N: SCRYPT_N, r: SCRYPT_R, p: SCRYPT_P, maxmem: 64 * 1024 * 1024 }, (err, key) => {
+        if (err || key.length !== expected.length) return resolve(false);
+        resolve(crypto.timingSafeEqual(key, expected));
+      });
+      return;
+    }
+    // Legacy: bare SHA-256 hex (pre-hardening installs). Still compared in
+    // constant time; on success the caller upgrades to scrypt.
+    if (/^[a-f0-9]{64}$/i.test(stored)) {
+      const h = crypto.createHash('sha256').update(password).digest();
+      const b = Buffer.from(stored, 'hex');
+      if (h.length !== b.length) return resolve(false);
+      return resolve(crypto.timingSafeEqual(h, b));
+    }
+    resolve(false);
+  });
+}
+
 // ─── Persistent credentials file ─────────────────────────────────────────────
-// Stored in the user's HOME directory so it survives app deletion + reinstalls.
-// ~/.clipstream-credentials on Mac/Linux, %USERPROFILE%\.clipstream-credentials on Windows
+// Survives app deletion + reinstalls. Contents are encrypted via Electron's
+// safeStorage (macOS Keychain / Windows DPAPI / Linux libsecret), so another
+// user copying the file to another machine cannot decrypt it.
 const CRED_FILE = path.join(os.homedir(), '.clipstream-credentials');
 
-function saveCredentialsToDisk(email, passwordHash) {
+function writeEncryptedCredentials(email, passwordHash) {
   try {
-    const data = JSON.stringify({ email, passwordHash, savedAt: Date.now() });
-    fs.writeFileSync(CRED_FILE, data, { encoding: 'utf8', mode: 0o600 });
+    if (!safeStorage.isEncryptionAvailable()) return; // skip rather than write plaintext
+    const plaintext = JSON.stringify({ email, passwordHash, savedAt: Date.now() });
+    const encrypted = safeStorage.encryptString(plaintext);
+    fs.writeFileSync(CRED_FILE, encrypted, { mode: 0o600 });
   } catch (e) {
     console.error('[ClipStream] Could not save credentials to disk:', e.message);
   }
 }
 
-function loadCredentialsFromDisk() {
+function readEncryptedCredentials() {
   try {
     if (!fs.existsSync(CRED_FILE)) return null;
-    const raw = fs.readFileSync(CRED_FILE, 'utf8');
-    return JSON.parse(raw);
-  } catch (e) {
+    const buf = fs.readFileSync(CRED_FILE);
+    if (safeStorage.isEncryptionAvailable()) {
+      try {
+        return JSON.parse(safeStorage.decryptString(buf));
+      } catch {
+        // Fall through to legacy plaintext parse
+      }
+    }
+    // Legacy plaintext JSON from pre-hardening installs — parse once, re-encrypt, keep moving.
+    try {
+      const legacy = JSON.parse(buf.toString('utf8'));
+      if (legacy && legacy.email && legacy.passwordHash) {
+        writeEncryptedCredentials(legacy.email, legacy.passwordHash);
+        return legacy;
+      }
+    } catch {}
+    return null;
+  } catch {
     return null;
   }
 }
@@ -1888,13 +2072,20 @@ function deleteCredentialsFromDisk() {
 // ─── Auth IPC ────────────────────────────────────────────────────────────────
 ipcMain.handle('auth:register', async (event, { email, password }) => {
   try {
-    const crypto = require('crypto');
-    const passwordHash = crypto.createHash('sha256').update(password).digest('hex');
+    if (!email || typeof email !== 'string') return { success: false, error: 'Email is required.' };
+    if (!password || typeof password !== 'string') return { success: false, error: 'Password is required.' };
+    if (password.length < 8) return { success: false, error: 'Password must be at least 8 characters.' };
+    // Single-account-per-install: refuse to overwrite an existing account.
+    // Otherwise a second signup silently replaces the first account's hash
+    // and the original user is locked out.
+    const existing = store.get('account');
+    if (existing && existing.email) {
+      return { success: false, error: `An account for ${existing.email} already exists on this device. Sign in instead, or clear the existing account from Settings.` };
+    }
+    const passwordHash = await hashPassword(password);
     store.set('account', { email, passwordHash, createdAt: Date.now() });
     store.set('auth.loggedIn', true);
-    // Persist to home directory so login survives reinstalls
-    saveCredentialsToDisk(email, passwordHash);
-    // Send welcome email automatically
+    writeEncryptedCredentials(email, passwordHash);
     sendWelcomeEmail(email).catch(() => {});
     return { success: true, email };
   } catch (err) {
@@ -1904,21 +2095,26 @@ ipcMain.handle('auth:register', async (event, { email, password }) => {
 
 ipcMain.handle('auth:login', async (event, { email, password }) => {
   try {
-    const crypto = require('crypto');
     const account = store.get('account');
     if (!account || !account.email) {
       return { success: false, error: 'No account found. Please sign up first.' };
     }
+    if (typeof email !== 'string' || typeof password !== 'string') {
+      return { success: false, error: 'Invalid email or password.' };
+    }
     if (account.email.toLowerCase() !== email.toLowerCase()) {
       return { success: false, error: 'Invalid email or password.' };
     }
-    const hash = crypto.createHash('sha256').update(password).digest('hex');
-    if (hash !== account.passwordHash) {
-      return { success: false, error: 'Invalid email or password.' };
+    const ok = await verifyPassword(password, account.passwordHash);
+    if (!ok) return { success: false, error: 'Invalid email or password.' };
+    // Upgrade legacy SHA-256 hashes to scrypt on first successful login.
+    let finalHash = account.passwordHash;
+    if (!account.passwordHash.startsWith('scrypt:')) {
+      finalHash = await hashPassword(password);
+      store.set('account', { ...account, passwordHash: finalHash });
     }
     store.set('auth.loggedIn', true);
-    // Persist to home directory so login survives reinstalls
-    saveCredentialsToDisk(account.email, account.passwordHash);
+    writeEncryptedCredentials(account.email, finalHash);
     return { success: true, email: account.email };
   } catch (err) {
     return { success: false, error: err.message };
@@ -1927,7 +2123,15 @@ ipcMain.handle('auth:login', async (event, { email, password }) => {
 
 ipcMain.handle('auth:logout', async () => {
   store.set('auth.loggedIn', false);
-  // Remove persistent credentials so the user is fully signed out
+  deleteCredentialsFromDisk();
+  return { success: true };
+});
+
+// Wipes the account from this device so a different user can sign up. Does NOT
+// touch clips, settings, or subscription — those are device-level state.
+ipcMain.handle('auth:deleteAccount', async () => {
+  store.set('account', { email: null, passwordHash: null, createdAt: null });
+  store.set('auth.loggedIn', false);
   deleteCredentialsFromDisk();
   return { success: true };
 });
@@ -1938,7 +2142,7 @@ ipcMain.handle('auth:status', async () => {
 
   // If store has no account (e.g. after reinstall), try restoring from home directory
   if (!account || !account.email) {
-    const saved = loadCredentialsFromDisk();
+    const saved = readEncryptedCredentials();
     if (saved && saved.email && saved.passwordHash) {
       console.log('[ClipStream] Restoring account from persistent credentials:', saved.email);
       account = { email: saved.email, passwordHash: saved.passwordHash, createdAt: saved.savedAt };
@@ -1950,7 +2154,7 @@ ipcMain.handle('auth:status', async () => {
 
   // If account exists in store but not on disk yet, backfill the disk file
   if (account && account.email && !fs.existsSync(CRED_FILE)) {
-    saveCredentialsToDisk(account.email, account.passwordHash);
+    writeEncryptedCredentials(account.email, account.passwordHash);
   }
 
   if (!account || !account.email) return { hasAccount: false, loggedIn: false };

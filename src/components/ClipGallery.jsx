@@ -2,11 +2,13 @@ import { useState, useMemo, useEffect, useRef, useCallback } from 'react';
 
 const platformColors = { twitch: '#9146ff', youtube: '#ff0000', kick: '#53fc18' };
 
-// Convert a local file path to a file:// URL safe for use in src attributes
+// Convert a local file path to a clipfile:// URL safe for use in src attributes.
+// The clipfile:// scheme is handled in main.js with a path-jail so the renderer
+// cannot read arbitrary files even if compromised.
 const toClipUrl = (filePath) => {
   if (!filePath) return '';
   // Encode each segment to handle spaces in paths like "Application Support"
-  return 'file://' + filePath.split('/').map(seg => encodeURIComponent(seg)).join('/');
+  return 'clipfile://' + filePath.split('/').map(seg => encodeURIComponent(seg)).join('/');
 };
 
 function formatDuration(s) {

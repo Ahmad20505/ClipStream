@@ -4,7 +4,7 @@ const platformColor = { twitch: '#9146ff', youtube: '#ff0000', kick: '#53fc18' }
 
 const toClipUrl = (filePath) => {
   if (!filePath) return '';
-  return 'file://' + filePath.split('/').map(seg => encodeURIComponent(seg)).join('/');
+  return 'clipfile://' + filePath.split('/').map(seg => encodeURIComponent(seg)).join('/');
 };
 
 function timeAgo(ts) {
