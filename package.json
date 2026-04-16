@@ -38,8 +38,7 @@
     "publish": {
       "provider": "github",
       "owner": "Ahmad20505",
-      "repo": "ClipStream",
-      "draft": false
+      "repo": "ClipStream"
     },
     "mac": {
       "category": "public.app-category.utilities",
