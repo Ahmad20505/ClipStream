@@ -22,6 +22,8 @@ jobs:
       - name: Build and publish Mac
         run: npx vite build && npx electron-builder --mac --publish always
         env:
+          # Skip code signing until Apple Developer enrollment is complete.
+          # Unsigned builds require users to right-click → Open on first launch.
           CSC_IDENTITY_AUTO_DISCOVERY: false
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           EP_DRAFT: false
