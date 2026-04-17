@@ -615,6 +615,12 @@ class MonitorSession {
     this.audioBaseline = null;
     this.chatBaseline  = null;
     this.hyping        = false; // true while in a hype window (prevents re-trigger)
+    // ── Tier 1 additions ──
+    this.streamStartedAt = 0;   // timestamp of the most recent streamlink connection;
+                                // distinct from this.startedAt (monitor-started) so we
+                                // can suppress clips during intro music after a reconnect
+    this.hypeTimestamps  = [];  // timestamps of hype-word messages (last 10 s)
+    this.hypeRate        = 0;   // count of hype messages in last 10 s
   }
 
   destroy() {
@@ -869,6 +875,10 @@ async function checkIfLive(streamer) {
 }
 
 async function startStreamCapture(session, streamUrl, settings) {
+  // Reset the per-connection clock. Used by checkForClipTrigger to suppress the
+  // first minute after (re)connect, where intro music routinely fires the
+  // audio detector against an old (quiet) baseline.
+  session.streamStartedAt = Date.now();
   // Use streamlink to pipe stream to ffmpeg for real-time audio analysis
   const streamlink = spawn('streamlink', [
     '--stdout',
@@ -980,6 +990,11 @@ function startChatMonitor(session) {
     while (i < messageTimestamps.length && messageTimestamps[i] < cutoff) i++;
     if (i > 0) messageTimestamps.splice(0, i);
     session.chatRate = messageTimestamps.length;
+    // Trim + count hype-word messages over the same 10 s window
+    let h = 0;
+    while (h < session.hypeTimestamps.length && session.hypeTimestamps[h] < cutoff) h++;
+    if (h > 0) session.hypeTimestamps.splice(0, h);
+    session.hypeRate = session.hypeTimestamps.length;
     // Record chat reading every 5 s for baseline (avoid flooding the array)
     if (!session._lastChatRecord || now - session._lastChatRecord > 5000) {
       pushReading(session.chatReadings, session.chatRate);
@@ -990,6 +1005,7 @@ function startChatMonitor(session) {
       id: session.streamer.id,
       audioLevel: session.audioLevel,
       chatRate: session.chatRate,
+      hypeRate: session.hypeRate,
       audioBaseline: session.audioBaseline,
       chatBaseline: session.chatBaseline,
     });
@@ -1014,9 +1030,12 @@ function startTwitchChat(session, messageTimestamps) {
       client.join(`#${session.streamer.login}`);
     });
 
-    client.on('privmsg', () => {
-      messageTimestamps.push(Date.now());
+    client.on('privmsg', (event) => {
+      const now = Date.now();
+      messageTimestamps.push(now);
       session.chatEverActive = true;
+      const msg = event && (event.message || event.text || '');
+      if (msg && isHypeMessage(msg)) session.hypeTimestamps.push(now);
     });
 
     client.on('close', () => {
@@ -1042,7 +1061,14 @@ function startYouTubeChat(session, messageTimestamps) {
       );
       const data = await res.json();
       if (data.items && data.items.length > 0) {
-        data.items.forEach(() => messageTimestamps.push(Date.now()));
+        const now = Date.now();
+        data.items.forEach((item) => {
+          messageTimestamps.push(now);
+          const text = item?.snippet?.displayMessage
+            || item?.snippet?.textMessageDetails?.messageText
+            || '';
+          if (isHypeMessage(text)) session.hypeTimestamps.push(now);
+        });
         session.chatEverActive = true;
       }
     } catch {}
@@ -1096,8 +1122,16 @@ async function startKickChat(session, messageTimestamps) {
       try {
         const msg = JSON.parse(data.toString());
         if (msg.event === 'App\\Events\\ChatMessageEvent' || msg.event === 'ChatMessageEvent') {
-          messageTimestamps.push(Date.now());
+          const now = Date.now();
+          messageTimestamps.push(now);
           session.chatEverActive = true;
+          // Kick nests the chat message payload as a JSON string inside msg.data
+          let content = '';
+          try {
+            const payload = typeof msg.data === 'string' ? JSON.parse(msg.data) : msg.data;
+            content = (payload && payload.content) || '';
+          } catch {}
+          if (content && isHypeMessage(content)) session.hypeTimestamps.push(now);
         }
       } catch {}
     });
@@ -1115,6 +1149,41 @@ async function startKickChat(session, messageTimestamps) {
   } catch (err) {
     console.error('Kick chat error:', err.message);
   }
+}
+
+// ─── Chat Hype Vocabulary ────────────────────────────────────────────────────
+// A message is "hype" if it contains any of these tokens (case-insensitive,
+// whole-word match). False negatives are fine — they just fall back to raw
+// chat rate. False positives are mitigated by also requiring elevated absolute
+// chat rate before triggering a clip.
+const HYPE_TOKENS = new Set([
+  'LETSGO','LETSGOO','LETSGOOO','LETSGOOOO','LETSGOOOOO','LETSGOOOOOO',
+  'POG','POGU','POGGERS','POGCHAMP','POGS','POGGIES','POGI','POGGG',
+  'HOLY','INSANE','UNREAL','SHEESH','JESUS','DAMN','DAYUM',
+  'CLIP','CLIPIT','CLIPPED','CLIPTHAT','CLIPABLE','CLIPPABLE','CLIPME',
+  'WHAT','WHAAAT','WHAAAAT','HUH','NOWAY','OMG','WTF','WTFF','WTFFF',
+  'W','DUB','EZ','EZCLAP','EZY','GG','GGWP','WIN',
+  'KEKW','LUL','LULW','OMEGALUL','PEPELAUGH','LMAO','LMFAO','ROFL',
+  'MONKAS','MONKAW','PAUSECHAMP','HYPERS','CATJAM',
+  'PEEPOCLAP','CLAP','CLAPS','CLAPCLAP',
+  'GIGACHAD','CHAD','BASED',
+  'JEBAITED','5HEAD','PEPEGA','SADGE','COPIUM','HOPIUM','NODDERS',
+  'WUT','WUTFACE','WEIRDCHAMP',
+  'BRUH','BRUHH','BRO',
+  'CLUTCH','NASTY','CRISPY','CLEAN','FILTHY','CRACKED','CRAZY','NUTS','GOAT',
+]);
+
+// True when a message carries hype signal beyond just existing. Splits on
+// common separators and checks each token; also treats short messages with
+// triple punctuation ("WHAT!!!") as hype reactions.
+function isHypeMessage(text) {
+  if (!text || typeof text !== 'string') return false;
+  const tokens = text.toUpperCase().split(/[\s.,;:()[\]{}'"+*/\\|<>@#$%^&=~`-]+/);
+  for (const t of tokens) {
+    if (t && HYPE_TOKENS.has(t)) return true;
+  }
+  if (text.length < 40 && /[!?]{3,}/.test(text)) return true;
+  return false;
 }
 
 // ─── Baseline Helpers ────────────────────────────────────────────────────────
@@ -1157,6 +1226,13 @@ function checkForClipTrigger(session, settings) {
   const warmup = 90000;
   if (now - session.startedAt < warmup) return;
 
+  // ── Intro / reconnect suppression ─────────────────────────────────────────
+  // The first 60 s after a stream (re)connects is dominated by intro music and
+  // greeting chat, which look like hype but aren't. Warmup above handles this on
+  // initial monitor start; streamStartedAt handles it on streamlink reconnect.
+  const sinceConnect = session.streamStartedAt ? now - session.streamStartedAt : Infinity;
+  if (sinceConnect < 60000) return;
+
   // ── Compute this streamer's personal baselines ─────────────────────────────
   const audioBaseline = computeBaseline(session.audioReadings); // LUFS 40th pct
   const chatBaseline  = computeBaseline(session.chatReadings);  // msg/10s 40th pct
@@ -1166,20 +1242,30 @@ function checkForClipTrigger(session, settings) {
 
   // ── Audio spike: dB above this streamer's normal level ────────────────────
   const audioSpikeDb = session.audioLevel - audioBaseline;
-  // Check for per-streamer sensitivity override, fall back to global
+
+  // ── Sensitivity — base + rating-feedback nudge ────────────────────────────
+  // ratingFeedbackDelta is written by clips:rate after ≥ 5 rated clips for this
+  // streamer. Avg rating 5★ → +20 (looser), 3★ → 0 (neutral), 1★ → -20 (tighter).
   const streamerOverride = store.get(`streamerSettings.${session.streamer.id}`, {});
-  const rawSensitivity   = streamerOverride.sensitivity ?? settings.sensitivity ?? 50;
-  const sensitivity      = Math.max(0, Math.min(100, rawSensitivity));
+  const baseSensitivity  = streamerOverride.sensitivity ?? settings.sensitivity ?? 50;
+  const ratingDelta      = typeof streamerOverride.ratingFeedbackDelta === 'number'
+    ? streamerOverride.ratingFeedbackDelta : 0;
+  const sensitivity      = Math.max(0, Math.min(100, baseSensitivity + ratingDelta));
   // Raised floor — needs a bigger spike to qualify
   const audioNeed      = 14 - (sensitivity / 100) * 6;   // 8–14 dB depending on sensitivity
   const audioTriggered = audioSpikeDb >= audioNeed && session.audioLevel > -40;
 
-  // ── Chat spike: multiple of this streamer's normal rate ───────────────────
-  const chatBase       = Math.max(chatBaseline ?? 0, 3);
-  const chatMultiplier = session.chatRate / chatBase;
+  // ── Chat spike (hype-weighted) ────────────────────────────────────────────
+  // Messages containing hype words/emotes count as 3 regular messages — raw
+  // chat rate is blind to *what* is being said; this makes "LETSGO POG CLIP IT"
+  // worth much more than "hi" × 20.
+  const hypeRate          = session.hypeRate || 0;
+  const effectiveChatRate = session.chatRate + hypeRate * 2;
+  const chatBase          = Math.max(chatBaseline ?? 0, 3);
+  const chatMultiplier    = effectiveChatRate / chatBase;
   // Require 3× normal chat rate minimum — filters out small bumps
-  const chatNeed       = 3.0 - (sensitivity / 100) * 1.0; // 2.0–3.0× depending on sensitivity
-  const chatTriggered  = chatMultiplier >= chatNeed && session.chatRate >= 8;
+  const chatNeed          = 3.0 - (sensitivity / 100) * 1.0; // 2.0–3.0× depending on sensitivity
+  const chatTriggered     = chatMultiplier >= chatNeed && effectiveChatRate >= 8;
 
   // ── Hype score 0–1 ────────────────────────────────────────────────────────
   const audioScore = Math.min(1, Math.max(0, (audioSpikeDb - audioNeed)  / 8));
@@ -1192,13 +1278,18 @@ function checkForClipTrigger(session, settings) {
   // Require both audio AND chat to spike simultaneously
   const bothTriggered = audioTriggered && chatTriggered;
   // Only clip on a single signal if it's truly extreme (huge outlier moments)
-  const extremeAudio  = audioSpikeDb >= audioNeed + 10 && chatWorking && session.chatRate >= 5;
+  const extremeAudio  = audioSpikeDb >= audioNeed + 10 && chatWorking && effectiveChatRate >= 5;
   const extremeChat   = chatMultiplier >= chatNeed  + 3 && audioSpikeDb >= 4;
   // Audio-only fallback only when chat genuinely never connected
   const audioOnly     = !chatWorking && audioSpikeDb >= audioNeed + 8;
 
-  // Hype score must also clear a minimum bar — filters borderline moments
-  const scoreThreshold = 0.35 + (1 - sensitivity / 100) * 0.25; // 0.35–0.60
+  // ── Score threshold: prefer the per-streamer learned threshold if present ─
+  // clips:rate writes `learnedThreshold` once there are ≥ 3 clips rated 4★+ for
+  // this streamer; it's the median hype-score of those clips minus a 0.05 margin.
+  // Falls back to the sensitivity-derived threshold for unrated streamers.
+  const scoreThreshold = typeof streamerOverride.learnedThreshold === 'number'
+    ? streamerOverride.learnedThreshold
+    : 0.35 + (1 - sensitivity / 100) * 0.25; // 0.35–0.60
   const shouldClip = (bothTriggered || extremeAudio || extremeChat || audioOnly) && hypeScore >= scoreThreshold;
 
   if (shouldClip) {
@@ -1206,8 +1297,8 @@ function checkForClipTrigger(session, settings) {
     console.log(
       `[ClipStream] 🎬 Hype! ${session.streamer.displayName} ` +
       `audio+${audioSpikeDb.toFixed(1)}dB (base ${audioBaseline.toFixed(1)}) ` +
-      `chat×${chatMultiplier.toFixed(1)} (base ${chatBase.toFixed(0)}) ` +
-      `score=${hypeScore.toFixed(2)} reason=${reason}`
+      `chat×${chatMultiplier.toFixed(1)} (base ${chatBase.toFixed(0)}, hype ${hypeRate}) ` +
+      `score=${hypeScore.toFixed(2)}/${scoreThreshold.toFixed(2)} reason=${reason}`
     );
     // ── Deduplication: skip if last clip was less than 10s ago ────────────────
     // This prevents double-clips when a stream briefly drops and reconnects
@@ -2526,18 +2617,33 @@ ipcMain.handle('clips:rate', async (event, { clipId, rating }) => {
   clips[idx] = { ...clips[idx], rating };
   store.set('recentClips', clips);
 
-  // Update per-streamer sensitivity nudge based on ratings
+  // Update per-streamer learning based on ratings
   const clip = clips[idx];
   const skey = `streamerSettings.${clip.streamerId}`;
   const sSettings = store.get(skey, {});
-  // Track average rating to influence detection — high ratings = keep current, low = tighten
   const streamerClips = clips.filter(c => c.streamerId === clip.streamerId && c.rating);
+
+  // Rating feedback nudge: average star rating shifts the sensitivity knob.
+  // Neutral at 3 stars (delta 0); avg 5★ → +20 (looser), avg 1★ → -20 (tighter).
+  // Requires ≥ 5 rated clips before we trust the signal.
   if (streamerClips.length >= 5) {
     const avgRating = streamerClips.reduce((s, c) => s + c.rating, 0) / streamerClips.length;
-    // avgRating 1-5: if < 2.5 tighten, if > 3.5 loosen slightly
-    sSettings.ratingFeedbackSensitivity = Math.round(avgRating * 10); // 10-50 nudge value
-    store.set(skey, sSettings);
+    sSettings.ratingFeedbackDelta = Math.round((avgRating - 3) * 10); // -20 … +20
   }
+
+  // Learned threshold: the median hypeScore of 4★+ rated clips for this streamer
+  // becomes (roughly) the trigger floor, so future detection fires for moments
+  // at least as "hype-y" as the ones the user has already blessed. Requires ≥ 3
+  // good-rated clips to avoid overfitting to a single lucky clip.
+  const goodScored = streamerClips.filter(c => c.rating >= 4 && typeof c.hypeScore === 'number');
+  if (goodScored.length >= 3) {
+    const scores = goodScored.map(c => c.hypeScore / 100).sort((a, b) => a - b);
+    const median = scores[Math.floor(scores.length / 2)];
+    // Keep a small margin below the median so we don't lose near-median moments.
+    sSettings.learnedThreshold = Math.max(0.20, Math.min(0.80, median - 0.05));
+  }
+
+  store.set(skey, sSettings);
 
   sendToRenderer('clip:updated', clips[idx]);
   return { success: true };
