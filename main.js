@@ -591,6 +591,29 @@ function thumbnailsDir() {
   return dir;
 }
 
+// Rolling video buffer per streamer. The monitor-side ffmpeg writes 10-s MPEG-TS
+// segments here and wraps around every 12 segments (≈ 2 min on disk) so capture
+// can pull the moment BEFORE the trigger fired. Cleaned on every (re)connection
+// and on monitor stop.
+function bufferDir(streamerId) {
+  const dir = path.join(app.getPath('userData'), 'buffer', String(streamerId));
+  if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
+  return dir;
+}
+
+function cleanupBuffer(streamerId) {
+  try {
+    const dir = bufferDir(streamerId);
+    for (const f of fs.readdirSync(dir)) {
+      if (f.startsWith('seg_') || f.startsWith('_concat_')) {
+        try { fs.unlinkSync(path.join(dir, f)); } catch {}
+      }
+    }
+  } catch {}
+}
+
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+
 // ─── Active Monitor Registry ─────────────────────────────────────────────────
 const activeMonitors = new Map(); // streamerId → MonitorSession
 
@@ -629,6 +652,8 @@ class MonitorSession {
     if (this.chatClient) { try { this.chatClient.quit(); } catch (e) {} }
     if (this.chatMonitorInterval) clearInterval(this.chatMonitorInterval);
     if (this.reconnectTimeout) clearTimeout(this.reconnectTimeout);
+    // Wipe the rolling buffer so old .ts files don't linger on disk.
+    try { cleanupBuffer(this.streamer.id); } catch {}
   }
 }
 
@@ -875,6 +900,15 @@ async function checkIfLive(streamer) {
 }
 
 async function startStreamCapture(session, streamUrl, settings) {
+  // Kill any leftover processes from a previous (re)connect before we reassign
+  // the session's references. Without this, an orphaned ffmpeg could still be
+  // writing to seg_*.ts files we're about to recreate, producing corrupt
+  // buffer content. Pre-existing subtle bug exposed by Tier 2's rolling buffer.
+  if (session.ffmpegProcess) { try { session.ffmpegProcess.kill('SIGKILL'); } catch {} }
+  if (session.streamlinkProcess) { try { session.streamlinkProcess.kill('SIGKILL'); } catch {} }
+  session.ffmpegProcess = null;
+  session.streamlinkProcess = null;
+
   // Reset the per-connection clock. Used by checkForClipTrigger to suppress the
   // first minute after (re)connect, where intro music routinely fires the
   // audio detector against an old (quiet) baseline.
@@ -890,16 +924,39 @@ async function startStreamCapture(session, streamUrl, settings) {
   session.streamlinkProcess = streamlink;
   const streamSource = streamlink;
 
-  // ebur128 outputs momentary loudness (M:) every ~0.1s — works on live streams
-  // volumedetect only outputs at end-of-file so it never fires on live streams
+  // Reset the rolling buffer on every (re)connection — old segments from a
+  // previous session would confuse retrospective clip extraction.
+  cleanupBuffer(session.streamer.id);
+  const bufDir = bufferDir(session.streamer.id);
+  const segmentPattern = path.join(bufDir, 'seg_%03d.ts');
+
+  // Dual-output ffmpeg:
+  //   • Output 1: ebur128 audio analysis → null (same as before, used for detection).
+  //   • Output 2: stream-copied MPEG-TS segments → rolling buffer on disk, 10 s
+  //     each, 12-segment wrap (~2 min of retained content). No re-encode, so
+  //     the extra output is almost free (streamlink already emits TS packets).
+  // ebur128 outputs momentary loudness (M:) every ~0.1s — works on live streams.
   const ffmpegInputArgs = ['-i', 'pipe:0'];
 
   const ffmpeg = spawn(ffmpegPath, [
     ...ffmpegInputArgs,
+    // ── Output 1: audio analysis ────────────────────────────────────
+    '-map', '0:a:0?',
     '-af', 'ebur128=peak=true',
-    '-vn',
     '-f', 'null',
     '-',
+    // ── Output 2: rolling video+audio buffer ────────────────────────
+    // Note: DO NOT add `-loglevel warning` here — it's a global option and
+    // ebur128's M: loudness lines print at info level, so suppressing info
+    // silently disables the audio detector.
+    '-map', '0:v:0?',
+    '-map', '0:a:0?',
+    '-c', 'copy',
+    '-f', 'segment',
+    '-segment_time', '10',
+    '-segment_wrap', '12',
+    '-reset_timestamps', '1',
+    segmentPattern,
   ]);
 
   session.ffmpegProcess = ffmpeg;
@@ -1316,7 +1373,104 @@ function checkForClipTrigger(session, settings) {
   }
 }
 
+// Pull the last `duration` seconds of the streamer's rolling buffer, centered
+// so the clip starts `lookback` seconds BEFORE the trigger — this is the whole
+// point of the buffer. Returns true on success (file written), false if the
+// buffer is empty / stale / didn't produce a usable file, so the caller can
+// fall back to live capture.
+async function tryBufferCapture(session, triggerTime, duration, lookback, outputPath) {
+  const dir = bufferDir(session.streamer.id);
+  // Wait for the buffer to capture post-trigger content. +12 s safety so the
+  // segment containing trigger+duration-lookback has actually been finalized.
+  const postWaitMs = Math.max(0, (duration - lookback + 12) * 1000);
+  await sleep(postWaitMs);
+
+  let files;
+  try {
+    files = fs.readdirSync(dir)
+      .filter((f) => f.startsWith('seg_') && f.endsWith('.ts'))
+      .map((f) => {
+        const p = path.join(dir, f);
+        try { return { path: p, mtime: fs.statSync(p).mtimeMs }; }
+        catch { return null; }
+      })
+      .filter(Boolean)
+      .sort((a, b) => a.mtime - b.mtime); // oldest → newest
+  } catch {
+    return false;
+  }
+  // Need at least 2 completed segments to pull from.
+  if (!files || files.length < 2) return false;
+
+  // Drop the newest — it's likely still being written by the monitor ffmpeg.
+  const completed = files.slice(0, -1);
+  const segCount = Math.ceil((duration + lookback) / 10) + 1;
+  const windowFiles = completed.slice(-segCount);
+  if (windowFiles.length < 2) return false;
+
+  // mtime ≈ when the segment finished being written, so its content started
+  // roughly 10 s earlier. Compute how much of the first segment to trim so
+  // the output starts at (triggerTime - lookback).
+  const oldestContentStart = windowFiles[0].mtime - 10000;
+  const desiredStart = triggerTime - lookback * 1000;
+  const leadTrimSec = Math.max(0, (desiredStart - oldestContentStart) / 1000);
+
+  // Build a concat list file for ffmpeg's concat demuxer.
+  const concatListPath = path.join(dir, `_concat_${Date.now()}.txt`);
+  const concatBody = windowFiles
+    .map((f) => `file '${f.path.replace(/'/g, "'\\''")}'`)
+    .join('\n');
+  try { fs.writeFileSync(concatListPath, concatBody); }
+  catch { return false; }
+
+  const ok = await new Promise((resolve) => {
+    const args = [
+      '-y',
+      '-f', 'concat',
+      '-safe', '0',
+      '-i', concatListPath,
+      '-ss', leadTrimSec.toFixed(3),
+      '-t', String(duration),
+      '-c:v', 'copy',
+      '-c:a', 'aac',
+      '-b:a', '128k',
+      '-movflags', '+faststart',
+      '-loglevel', 'warning',
+      outputPath,
+    ];
+    const ff = spawn(ffmpegPath, args);
+    ff.on('error', (err) => {
+      console.error('[ClipStream] Buffer-capture ffmpeg error:', err.message);
+      resolve(false);
+    });
+    ff.on('close', () => {
+      try { fs.unlinkSync(concatListPath); } catch {}
+      try {
+        const stat = fs.statSync(outputPath);
+        resolve(stat.size > 100000);
+      } catch { resolve(false); }
+    });
+    setTimeout(() => { try { ff.kill('SIGTERM'); } catch {} }, 60000);
+  });
+
+  return ok;
+}
+
+// Lookback in seconds based on trigger reason. Chat-led spikes reflect
+// something that already happened; audio-led spikes are much closer to
+// real-time. Bias the window to the signal's latency.
+function lookbackForReason(reason) {
+  switch (reason) {
+    case 'extreme-chat': return 15;
+    case 'extreme-audio':
+    case 'audio-only':   return 5;
+    case 'both':
+    default:             return 8;
+  }
+}
+
 async function captureClip(session, settings, hypeScore = 0.5, reason = 'both', isMergeCandidate = false) {
+  const triggerTime = Date.now();
   const streamUrl = getStreamUrl(session.streamer);
 
   // Clips land in staging first — user reviews and saves from the gallery
@@ -1336,7 +1490,8 @@ async function captureClip(session, settings, hypeScore = 0.5, reason = 'both', 
     }
   }
 
-  console.log(`[ClipStream] Starting clip capture → staging → ${outputPath}`);
+  const lookback = lookbackForReason(reason);
+  console.log(`[ClipStream] Starting clip capture → staging (lookback ${lookback}s) → ${outputPath}`);
 
   // Helper: save clip data to store and notify renderer
   function finalizeClip() {
@@ -1388,7 +1543,19 @@ async function captureClip(session, settings, hypeScore = 0.5, reason = 'both', 
     }
   }
 
-  // ── Try streamlink → ffmpeg pipe ─────────────────────────────────────────
+  // ── Retrospective path: pull the moment BEFORE the trigger from the rolling
+  // buffer written by the monitor ffmpeg. This is the Tier 2 primary path —
+  // clips now capture the hype moment itself, not just the reaction to it.
+  const bufferOk = await tryBufferCapture(session, triggerTime, duration, lookback, outputPath);
+  if (bufferOk) {
+    console.log('[ClipStream] Buffer capture succeeded — clip includes pre-trigger context');
+    finalizeClip();
+    return;
+  }
+  console.log('[ClipStream] Buffer capture unavailable; falling back to live capture');
+
+  // ── Fallback: legacy streamlink → ffmpeg pipe (used when buffer empty/stale,
+  // e.g., first trigger on a freshly-started stream).
   const ffmpegArgs = [
     '-y',
     '-i', 'pipe:0',
