@@ -76,9 +76,16 @@ function initAutoUpdater() {
     console.error('[ClipStream] Auto-updater error:', err.message);
   });
 
-  // Check 5s after launch, then every 4 hours
-  setTimeout(() => autoUpdater.checkForUpdatesAndNotify(), 5000);
-  setInterval(() => autoUpdater.checkForUpdatesAndNotify(), 4 * 60 * 60 * 1000);
+  // Check 5s after launch, then every 4 hours. Wrap in .catch so a transient
+  // GitHub error or a missing latest.yml can't bubble up as an unhandled
+  // rejection and spook users — the 'error' event above already logged it.
+  const safeCheck = () => {
+    autoUpdater.checkForUpdatesAndNotify().catch((err) => {
+      console.error('[ClipStream] update check failed:', err && (err.message || err));
+    });
+  };
+  setTimeout(safeCheck, 5000);
+  setInterval(safeCheck, 4 * 60 * 60 * 1000);
 }
 
 // ─── File Logger ─────────────────────────────────────────────────────────────
@@ -148,9 +155,12 @@ process.on('uncaughtException', (err) => {
   if (app.isReady() && app.isPackaged) showFatalErrorDialog('uncaughtException', err);
 });
 
+// Unhandled rejections are LOGGED but not treated as fatal. Most come from
+// recoverable async failures — auto-update network errors, webhook delivery
+// glitches, third-party API timeouts — where crashing the app helps no one.
+// uncaughtException above still catches genuinely fatal errors.
 process.on('unhandledRejection', (reason) => {
   console.error('[ClipStream] Unhandled rejection:', reason && (reason.stack || reason.message || reason));
-  if (app.isReady() && app.isPackaged) showFatalErrorDialog('unhandledRejection', reason);
 });
 
 // ─── App Configuration ──────────────────────────────────────────────────────
