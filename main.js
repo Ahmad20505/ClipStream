@@ -81,17 +81,76 @@ function initAutoUpdater() {
   setInterval(() => autoUpdater.checkForUpdatesAndNotify(), 4 * 60 * 60 * 1000);
 }
 
+// ─── File Logger ─────────────────────────────────────────────────────────────
+// Mirrors console.log/.warn/.error into a persistent file inside userData so
+// a tester can send me the log when the packaged app misbehaves. Without this,
+// DevTools is disabled in packaged builds (for security) and there's no way
+// to see why a silent crash happened.
+//
+// Log file: <userData>/logs/main.log  (truncates above 10 MB to stop growth)
+let LOG_FILE_PATH = null;
+function initFileLogger() {
+  try {
+    const logDir = path.join(app.getPath('userData'), 'logs');
+    if (!fs.existsSync(logDir)) fs.mkdirSync(logDir, { recursive: true });
+    LOG_FILE_PATH = path.join(logDir, 'main.log');
+    try {
+      const stat = fs.statSync(LOG_FILE_PATH);
+      if (stat.size > 10 * 1024 * 1024) fs.truncateSync(LOG_FILE_PATH, 0);
+    } catch {}
+
+    const fmt = (a) =>
+      typeof a === 'string' ? a
+        : a && a.stack ? a.stack
+        : (() => { try { return JSON.stringify(a); } catch { return String(a); } })();
+    const write = (level, args) => {
+      const line = `[${new Date().toISOString()}] [${level}] ${args.map(fmt).join(' ')}\n`;
+      try { fs.appendFileSync(LOG_FILE_PATH, line); } catch {}
+    };
+    const origLog = console.log.bind(console);
+    const origWarn = console.warn.bind(console);
+    const origError = console.error.bind(console);
+    console.log = (...args) => { write('LOG',   args); origLog(...args); };
+    console.warn = (...args) => { write('WARN',  args); origWarn(...args); };
+    console.error = (...args) => { write('ERROR', args); origError(...args); };
+
+    console.log(`[ClipStream] v${app.getVersion()} starting on ${process.platform} ${process.arch} (node ${process.version}, electron ${process.versions.electron})`);
+  } catch (err) {
+    try { console.error('[ClipStream] File logger init failed:', err && err.message); } catch {}
+  }
+}
+initFileLogger();
+
+// Pops a native error dialog so packaged-build startup failures are VISIBLE
+// instead of the app just living silently in Task Manager. Also writes to the
+// log file for later triage.
+function showFatalErrorDialog(where, err) {
+  const detail = (err && err.stack) ? err.stack : String(err);
+  try { console.error(`[ClipStream] Fatal in ${where}:`, detail); } catch {}
+  try {
+    const logHint = LOG_FILE_PATH ? `\n\nFull log: ${LOG_FILE_PATH}` : '';
+    dialog.showErrorBox(
+      `ClipStream failed to start (${where})`,
+      `${err && err.message ? err.message : 'Unknown error'}\n\n${detail}${logHint}`
+    );
+  } catch {}
+}
+
 // ─── Global EPIPE / uncaught-exception safety net ───────────────────────────
 // EPIPE (broken pipe) fires when one side of a pipe (streamlink → ffmpeg)
 // closes while the other is still writing. This is expected behaviour when
 // a monitor is stopped mid-stream and must NOT crash the main process.
 process.on('uncaughtException', (err) => {
-  if (err.code === 'EPIPE' || err.message?.includes('EPIPE')) {
-    // Broken pipe from a child-process pipe closing — safe to ignore.
-    return;
+  if (err && (err.code === 'EPIPE' || (err.message && err.message.includes('EPIPE')))) {
+    return; // Broken pipe from a child-process pipe closing — safe to ignore.
   }
-  // Re-throw anything else so Electron's default handler still sees it.
-  console.error('[ClipStream] Uncaught exception:', err);
+  console.error('[ClipStream] Uncaught exception:', err && (err.stack || err.message || err));
+  if (app.isReady() && app.isPackaged) showFatalErrorDialog('uncaughtException', err);
+});
+
+process.on('unhandledRejection', (reason) => {
+  console.error('[ClipStream] Unhandled rejection:', reason && (reason.stack || reason.message || reason));
+  if (app.isReady() && app.isPackaged) showFatalErrorDialog('unhandledRejection', reason);
 });
 
 // ─── App Configuration ──────────────────────────────────────────────────────
@@ -200,6 +259,7 @@ function isClipFilePathAllowed(filePath) {
 }
 
 app.whenReady().then(async () => {
+  try {
   // Handle clipfile:// requests by serving the local file
   protocol.handle('clipfile', async (request) => {
     try {
@@ -277,15 +337,26 @@ app.whenReady().then(async () => {
   ensureOutputDir();
   cleanupOldThumbnails();
   createWindow();
-  createTray();
-  scheduleRenewalCheck();
-  scheduleDailyDigest();
-  checkStreamlinkInstalled();
-  initAutoUpdater();
-  scheduleAutoCleanup();
+  // Post-window init — wrap each non-critical piece so a failure in one
+  // doesn't leave the window invisible. All of these are "nice to have":
+  // the app is usable without tray, updater, digest, etc.
+  try { createTray(); }            catch (e) { console.error('[ClipStream] createTray failed:', e && e.message); }
+  try { scheduleRenewalCheck(); }  catch (e) { console.error('[ClipStream] scheduleRenewalCheck failed:', e && e.message); }
+  try { scheduleDailyDigest(); }   catch (e) { console.error('[ClipStream] scheduleDailyDigest failed:', e && e.message); }
+  try { checkStreamlinkInstalled(); } catch (e) { console.error('[ClipStream] checkStreamlinkInstalled failed:', e && e.message); }
+  try { initAutoUpdater(); }       catch (e) { console.error('[ClipStream] initAutoUpdater failed:', e && e.message); }
+  try { scheduleAutoCleanup(); }   catch (e) { console.error('[ClipStream] scheduleAutoCleanup failed:', e && e.message); }
   app.on('activate', () => {
     if (BrowserWindow.getAllWindows().length === 0) createWindow();
   });
+  } catch (err) {
+    // A throw up here means we couldn't even get the main window on screen —
+    // show the user a native error instead of a silent zombie process.
+    console.error('[ClipStream] Startup failed:', err && (err.stack || err.message || err));
+    showFatalErrorDialog('startup', err);
+    // Give the dialog a moment to display before we quit.
+    setTimeout(() => app.quit(), 500);
+  }
 });
 
 // ─── Streamlink Check ────────────────────────────────────────────────────────
