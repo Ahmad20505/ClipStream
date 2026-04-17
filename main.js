@@ -55,7 +55,12 @@ function initAutoUpdater() {
   });
 
   autoUpdater.on('update-downloaded', (info) => {
-    dialog.showMessageBox(mainWindow, {
+    // Surface the window before prompting — an update can finish downloading
+    // while the app is hidden in the system tray, and a dialog parented to a
+    // hidden/destroyed window never becomes visible to the user.
+    const parent = (mainWindow && !mainWindow.isDestroyed()) ? mainWindow : undefined;
+    if (parent && !parent.isVisible()) { try { parent.show(); } catch {} }
+    dialog.showMessageBox(parent, {
       type: 'info',
       title: '🎉 Update Ready to Install',
       message: `ClipStream v${info.version} has been downloaded.`,
