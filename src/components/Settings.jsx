@@ -148,7 +148,7 @@ const TABS = [
 ];
 
 // ── Main Component ────────────────────────────────────────────────────────────
-export default function Settings({ settings, onSave, subscription, onLogout }) {
+export default function Settings({ settings, onSave, subscription, onLogout, onAccountDeleted }) {
   const [tab, setTab] = useState('account');
   const [form, setForm] = useState({
     outputDir: settings?.outputDir || '',
@@ -178,6 +178,8 @@ export default function Settings({ settings, onSave, subscription, onLogout }) {
   const [saved, setSaved] = useState(false);
   const [showLogoutConfirm, setShowLogoutConfirm] = useState(false);
   const [loggingOut, setLoggingOut] = useState(false);
+  const [showDeleteConfirm, setShowDeleteConfirm] = useState(false);
+  const [deleting, setDeleting] = useState(false);
   const [authStatus, setAuthStatus] = useState(null);
   const [diskUsage, setDiskUsage] = useState(null);
 
@@ -216,6 +218,22 @@ export default function Settings({ settings, onSave, subscription, onLogout }) {
     setLoggingOut(true);
     try { await api.auth.logout(); onLogout(); }
     catch { setLoggingOut(false); setShowLogoutConfirm(false); }
+  };
+
+  // Harder-hitting variant of logout: also wipes the local account record so
+  // the app returns to its "never been signed up" state. Used when switching
+  // to a different email on the same device — with the single-account-per-
+  // install guard, a plain sign-out isn't enough.
+  const handleDeleteAccount = async () => {
+    setDeleting(true);
+    try {
+      if (api.auth.deleteAccount) await api.auth.deleteAccount();
+      else await api.auth.logout();   // fallback if running an older preload
+      onAccountDeleted ? onAccountDeleted() : onLogout();
+    } catch {
+      setDeleting(false);
+      setShowDeleteConfirm(false);
+    }
   };
 
   const planLabel = subscription?.active
@@ -329,6 +347,28 @@ export default function Settings({ settings, onSave, subscription, onLogout }) {
               <div style={{ display: 'flex', justifyContent: 'flex-end' }}>
                 <Toggle checked={form.notifications} onChange={v => set('notifications', v)} />
               </div>
+            </SettingRow>
+          </SectionCard>
+
+          {/* Danger zone — used primarily to switch accounts on the same device.
+              ClipStream is single-account-per-install; to sign up with a
+              different email you have to clear the current account first. */}
+          <SectionCard>
+            <SectionHeader
+              icon={<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M10.29 3.86 1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z"/><line x1="12" y1="9" x2="12" y2="13"/><line x1="12" y1="17" x2="12.01" y2="17"/></svg>}
+              title="Danger zone"
+              subtitle="Destructive actions — please read before clicking"
+            />
+            <SettingRow
+              label="Delete account from this device"
+              hint="Removes the stored email + password hash. Your clips, settings, and subscription are kept (subscription is tied to your email on the server). You'll need to sign up again or sign in from another device."
+            >
+              <button
+                onClick={() => setShowDeleteConfirm(true)}
+                style={{ display: 'flex', alignItems: 'center', gap: 7, padding: '9px 16px', background: 'rgba(239,68,68,0.1)', border: '1px solid rgba(239,68,68,0.35)', borderRadius: 9, color: '#f87171', fontSize: 13, fontWeight: 600, cursor: 'pointer', fontFamily: 'var(--font-body)' }}
+              >
+                Delete local account
+              </button>
             </SettingRow>
           </SectionCard>
         </>
@@ -648,6 +688,28 @@ export default function Settings({ settings, onSave, subscription, onLogout }) {
               <button className="btn-cancel" onClick={() => setShowLogoutConfirm(false)} disabled={loggingOut}>Cancel</button>
               <button className="btn-danger" onClick={handleLogout} disabled={loggingOut}>
                 {loggingOut ? 'Signing out…' : 'Sign Out'}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Delete local account confirm modal */}
+      {showDeleteConfirm && (
+        <div className="modal-overlay">
+          <div className="modal-card logout-confirm">
+            <h3>Delete local account?</h3>
+            <p>
+              This removes <strong>{authStatus?.email || 'the current account'}</strong> from this device.
+              You'll see the sign-up screen next time the app opens.
+            </p>
+            <p style={{ marginTop: 8, fontSize: 13, color: 'var(--text-muted)' }}>
+              Your subscription stays active (tied to your email on the server). Clips, settings, and API keys on this device are <em>not</em> deleted.
+            </p>
+            <div className="modal-actions">
+              <button className="btn-cancel" onClick={() => setShowDeleteConfirm(false)} disabled={deleting}>Cancel</button>
+              <button className="btn-danger" onClick={handleDeleteAccount} disabled={deleting}>
+                {deleting ? 'Deleting…' : 'Delete local account'}
               </button>
             </div>
           </div>

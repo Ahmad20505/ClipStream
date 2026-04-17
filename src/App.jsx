@@ -185,6 +185,18 @@ export default function App() {
     showToast('Signed out successfully', 'info');
   }, [showToast]);
 
+  // Stronger-than-logout path: the account record was wiped from this device.
+  // Send the user all the way back to the signup screen (no account exists),
+  // rather than the sign-in screen that assumes one does.
+  const handleAccountDeleted = useCallback(() => {
+    setAuthState('no-account');
+    setSubscription(null);
+    setMonitors([]);
+    setClips([]);
+    setPage('dashboard');
+    showToast('Local account cleared — you can sign up with a new email', 'info');
+  }, [showToast]);
+
   // ── Loading ───────────────────────────────────────────────────────────────
   if (loading) {
     return (
@@ -251,7 +263,7 @@ export default function App() {
       case 'help':
         return <Help />;
       case 'settings':
-        return <Settings settings={settings} onSave={handleSaveSettings} subscription={subscription} onLogout={handleLogout} />;
+        return <Settings settings={settings} onSave={handleSaveSettings} subscription={subscription} onLogout={handleLogout} onAccountDeleted={handleAccountDeleted} />;
       default:
         return <Dashboard monitors={monitors} clips={clips} onNavigate={setPage} />;
     }
