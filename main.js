@@ -158,7 +158,13 @@ let Store;
 let store;
 
 async function initStore() {
-  const { default: ElectronStore } = await import('electron-store');
+  // electron-store@8 is CommonJS (module.exports = ElectronStore) despite being
+  // imported via ESM-style `await import()` in earlier revisions. The ESM loader
+  // fails to resolve bare package specifiers from inside an asar archive on
+  // Windows (path-separator bug in Node's resolver), which caused v1.0.10 to
+  // startup-crash on Windows even though macOS worked. Plain require() uses
+  // the CJS loader, which handles asar correctly on every platform.
+  const ElectronStore = require('electron-store');
   Store = ElectronStore;
   store = new Store({
     defaults: {
@@ -915,7 +921,9 @@ async function pollLiveStatus(session, streamUrl, settings) {
 
 // Returns true/false, or null if the check failed (caller should keep previous state)
 async function checkIfLive(streamer) {
-  const { default: nodeFetch } = await import('node-fetch');
+  // node-fetch v2 is CJS; use require() not dynamic import (see initStore
+  // comment — ESM loader breaks on Windows inside asar).
+  const nodeFetch = require('node-fetch');
   const apiKeys = store.get('apiKeys');
 
   try {
@@ -1188,7 +1196,7 @@ function startYouTubeChat(session, messageTimestamps) {
     try {
       const apiKeys = store.get('apiKeys');
       if (!apiKeys.youtubeApiKey || !session.streamer._liveChatId) return;
-      const { default: fetch } = await import('node-fetch');
+      const fetch = require('node-fetch');
       const res = await fetch(
         `https://www.googleapis.com/youtube/v3/liveChat/messages?liveChatId=${session.streamer._liveChatId}&part=snippet&key=${apiKeys.youtubeApiKey}`
       );
@@ -1783,7 +1791,7 @@ function isSafeWebhookUrl(urlStr) {
 }
 
 async function fireWebhooks(clip, settings) {
-  const { default: nodeFetch } = await import('node-fetch');
+  const nodeFetch = require('node-fetch');
 
   // Discord webhook
   if (settings.discordWebhook && !isSafeWebhookUrl(settings.discordWebhook)) {
@@ -2257,7 +2265,7 @@ ipcMain.handle('subscription:startCheckout', async () => {
 // ─── Twitch Search IPC ───────────────────────────────────────────────────────
 ipcMain.handle('search:streamers', async (event, { query, platform }) => {
   const apiKeys = store.get('apiKeys');
-  const { default: fetch } = await import('node-fetch');
+  const fetch = require('node-fetch');
 
   try {
     if (platform === 'twitch' || platform === 'all') {

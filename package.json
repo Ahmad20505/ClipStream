@@ -1,6 +1,6 @@
 {
   "name": "clipstream",
-  "version": "1.0.11",
+  "version": "1.0.12",
   "description": "AI-powered automatic stream clipper for Twitch, YouTube, and Kick",
   "author": "Ahmad Othman",
   "main": "main.js",
