@@ -1,6 +1,6 @@
 {
   "name": "clipstream",
-  "version": "1.0.14",
+  "version": "1.0.15",
   "description": "AI-powered automatic stream clipper for Twitch, YouTube, and Kick",
   "author": "Ahmad Othman",
   "main": "main.js",
@@ -39,7 +39,8 @@
     "publish": {
       "provider": "github",
       "owner": "Ahmad20505",
-      "repo": "ClipStream"
+      "repo": "ClipStream",
+      "releaseType": "release"
     },
     "mac": {
       "category": "public.app-category.utilities",
