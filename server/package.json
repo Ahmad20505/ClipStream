@@ -1,0 +1,14 @@
+{
+  "name": "clipstream-subscription-server",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Cloudflare Worker that verifies ClipStream subscriptions via Stripe webhooks.",
+  "scripts": {
+    "dev": "wrangler dev",
+    "deploy": "wrangler deploy",
+    "tail": "wrangler tail"
+  },
+  "dependencies": {
+    "stripe": "^14.25.0"
+  }
+}

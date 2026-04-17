@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useState, useEffect, useRef } from 'react';
 
 const PROMO_CODES = {
   'FORGEFREE': { discount: 100, label: '100% off — Free Access!' },
@@ -26,30 +26,44 @@ export default function SubscriptionGate({ onSubscribe, onGoToSignIn }) {
   const [email, setEmail] = useState('');
   const [password, setPassword] = useState('');
   const [confirmPassword, setConfirmPassword] = useState('');
-  const [cardNumber, setCardNumber] = useState('');
-  const [expiry, setExpiry] = useState('');
-  const [cvv, setCvv] = useState('');
-  const [name, setName] = useState('');
   const [error, setError] = useState('');
-  const [step, setStep] = useState('plan');
+  const [step, setStep] = useState('plan'); // 'plan' | 'checkout' | 'waiting'
   const [promoCode, setPromoCode] = useState('');
   const [promoApplied, setPromoApplied] = useState(null);
+  const pollTimer = useRef(null);
 
   const isFree = promoApplied?.discount === 100;
   const finalPrice = promoApplied
     ? (BASE_PRICE * (1 - promoApplied.discount / 100)).toFixed(2)
     : BASE_PRICE.toFixed(2);
 
-  const formatCard = (val) => {
-    const digits = val.replace(/\D/g, '').slice(0, 16);
-    return digits.replace(/(.{4})/g, '$1 ').trim();
-  };
-
-  const formatExpiry = (val) => {
-    const digits = val.replace(/\D/g, '').slice(0, 4);
-    if (digits.length >= 3) return `${digits.slice(0, 2)}/${digits.slice(2)}`;
-    return digits;
-  };
+  // Poll the Worker for subscription activation while on the 'waiting' screen.
+  // User pays in an external browser tab; we can't observe that directly, so we
+  // poll until the webhook has updated KV and /subscription reports active.
+  useEffect(() => {
+    if (step !== 'waiting') {
+      if (pollTimer.current) { clearInterval(pollTimer.current); pollTimer.current = null; }
+      return;
+    }
+    const tick = async () => {
+      try {
+        const result = await api.subscription.check();
+        if (result && result.active) {
+          clearInterval(pollTimer.current);
+          pollTimer.current = null;
+          onSubscribe({
+            active: true,
+            plan: result.plan || 'pro_monthly',
+            expiresAt: result.expiresAt,
+            email,
+          });
+        }
+      } catch {}
+    };
+    pollTimer.current = setInterval(tick, 3000);
+    tick();
+    return () => { if (pollTimer.current) clearInterval(pollTimer.current); };
+  }, [step, email, onSubscribe]);
 
   const handleApplyPromo = () => {
     const code = promoCode.trim().toUpperCase();
@@ -62,27 +76,20 @@ export default function SubscriptionGate({ onSubscribe, onGoToSignIn }) {
     }
   };
 
-  const handleCheckout = async (e) => {
+  const handleSubmit = async (e) => {
     e.preventDefault();
     setError('');
 
     if (!email) { setError('Please enter your email.'); return; }
-
     if (!password) { setError('Please create a password.'); return; }
     if (password.length < 8) { setError('Password must be at least 8 characters.'); return; }
     if (password !== confirmPassword) { setError('Passwords do not match.'); return; }
 
-    // If free via promo, skip card details
-    if (!isFree && (!cardNumber || !expiry || !cvv || !name)) {
-      setError('Please fill in all payment fields.');
-      return;
-    }
-
     setLoading(true);
     try {
-      await new Promise(res => setTimeout(res, 1200));
-
-      // Register the account with hashed password
+      // Create the account first so we have a stable identity to tie the
+      // subscription to. Register is idempotent-ish: it refuses overwrite, so
+      // re-submits don't clobber anything.
       const regResult = await api.auth.register({ email, password });
       if (!regResult.success) {
         setError(regResult.error || 'Failed to create account.');
@@ -90,19 +97,52 @@ export default function SubscriptionGate({ onSubscribe, onGoToSignIn }) {
         return;
       }
 
-      const expiresAt = Date.now() + 30 * 24 * 60 * 60 * 1000;
-      onSubscribe({
-        active: true,
-        plan: isFree ? 'promo_free' : 'pro_monthly',
-        expiresAt,
-        customerId: `cus_${Math.random().toString(36).slice(2)}`,
-        email,
-        promoCode: promoApplied?.code || null,
-      });
+      if (isFree) {
+        // Promo code path: skip Stripe entirely.
+        const expiresAt = Date.now() + 30 * 24 * 60 * 60 * 1000;
+        onSubscribe({
+          active: true,
+          plan: 'promo_free',
+          expiresAt,
+          email,
+          promoCode: promoApplied?.code || null,
+        });
+        return;
+      }
+
+      // Paid path: ask the Worker to create a Stripe Checkout session and
+      // open it in the user's default browser. We then move to the waiting
+      // screen and poll for activation.
+      const co = await api.subscription.startCheckout();
+      if (!co.success) {
+        setError(co.error || 'Could not start checkout. Please try again.');
+        setLoading(false);
+        return;
+      }
+      setStep('waiting');
     } catch (err) {
       setError('Something went wrong. Please try again.');
     } finally {
       setLoading(false);
+    }
+  };
+
+  const handleManualRecheck = async () => {
+    setError('');
+    try {
+      const result = await api.subscription.check();
+      if (result && result.active) {
+        onSubscribe({
+          active: true,
+          plan: result.plan || 'pro_monthly',
+          expiresAt: result.expiresAt,
+          email,
+        });
+      } else {
+        setError("We don't see an active subscription yet. If you just paid, give it a few more seconds.");
+      }
+    } catch {
+      setError('Could not reach the subscription server. Check your internet connection.');
     }
   };
 
@@ -149,7 +189,7 @@ export default function SubscriptionGate({ onSubscribe, onGoToSignIn }) {
             <button className="btn-subscribe" onClick={() => setStep('checkout')}>
               Start Clipping Now →
             </button>
-            <p className="pricing-note">Cancel anytime · No hidden fees · 3-day free trial</p>
+            <p className="pricing-note">Cancel anytime · No hidden fees · Secure payment via Stripe</p>
           </div>
 
           {onGoToSignIn && (
@@ -170,6 +210,42 @@ export default function SubscriptionGate({ onSubscribe, onGoToSignIn }) {
     );
   }
 
+  // ── Waiting Screen (user is paying in their browser) ────
+  if (step === 'waiting') {
+    return (
+      <div className="sub-gate">
+        <div className="sub-gate-content">
+          <div className="checkout-card">
+            <h2 className="checkout-title">Complete payment in your browser</h2>
+            <p className="checkout-subtitle" style={{ marginBottom: 24 }}>
+              We opened Stripe Checkout in a new browser tab. Complete your payment there, then come back — ClipStream will unlock automatically within a few seconds.
+            </p>
+
+            <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', padding: '24px 0' }}>
+              <div className="btn-spinner" style={{ width: 32, height: 32, borderWidth: 3 }} />
+              <p style={{ marginTop: 16, color: '#9ca3af', fontSize: 14 }}>Waiting for Stripe to confirm your payment…</p>
+            </div>
+
+            {error && <p className="form-error">{error}</p>}
+
+            <button type="button" className="btn-subscribe" onClick={handleManualRecheck} style={{ marginTop: 12 }}>
+              I've paid — check now
+            </button>
+
+            <button
+              type="button"
+              className="auth-link"
+              onClick={() => { setStep('checkout'); setError(''); }}
+              style={{ marginTop: 16, display: 'block', margin: '16px auto 0' }}
+            >
+              ← Back to checkout
+            </button>
+          </div>
+        </div>
+      </div>
+    );
+  }
+
   // ── Checkout Screen ──────────────────────────────────────
   return (
     <div className="sub-gate">
@@ -178,9 +254,8 @@ export default function SubscriptionGate({ onSubscribe, onGoToSignIn }) {
           <button className="checkout-back" onClick={() => { setStep('plan'); setPromoApplied(null); setPromoCode(''); setError(''); }}>
             ← Back
           </button>
-          <h2 className="checkout-title">Complete your subscription</h2>
+          <h2 className="checkout-title">Create your account</h2>
 
-          {/* Price display */}
           <div className="checkout-price-row">
             {promoApplied ? (
               <>
@@ -194,7 +269,6 @@ export default function SubscriptionGate({ onSubscribe, onGoToSignIn }) {
             )}
           </div>
 
-          {/* Promo Code */}
           <div className="promo-row">
             <input
               className="promo-input"
@@ -216,7 +290,7 @@ export default function SubscriptionGate({ onSubscribe, onGoToSignIn }) {
             </div>
           )}
 
-          <form className="checkout-form" onSubmit={handleCheckout}>
+          <form className="checkout-form" onSubmit={handleSubmit}>
             <div className="form-field">
               <label>Email address</label>
               <input
@@ -251,62 +325,6 @@ export default function SubscriptionGate({ onSubscribe, onGoToSignIn }) {
               />
             </div>
 
-            {/* Only show card fields if not 100% free */}
-            {!isFree && (
-              <>
-                <div className="form-field">
-                  <label>Cardholder name</label>
-                  <input
-                    type="text"
-                    placeholder="John Smith"
-                    value={name}
-                    onChange={e => setName(e.target.value)}
-                  />
-                </div>
-
-                <div className="form-field">
-                  <label>Card number</label>
-                  <div className="card-input-wrap">
-                    <input
-                      type="text"
-                      placeholder="1234 5678 9012 3456"
-                      value={cardNumber}
-                      onChange={e => setCardNumber(formatCard(e.target.value))}
-                      maxLength={19}
-                    />
-                    <svg className="card-icon" width="24" height="16" viewBox="0 0 24 16" fill="none">
-                      <rect width="24" height="16" rx="2" fill="#1a1a2e" />
-                      <rect y="4" width="24" height="5" fill="#2a2a3e" />
-                      <rect x="3" y="11" width="7" height="2" rx="1" fill="#7c3aed" />
-                    </svg>
-                  </div>
-                </div>
-
-                <div className="form-row">
-                  <div className="form-field">
-                    <label>Expiry</label>
-                    <input
-                      type="text"
-                      placeholder="MM/YY"
-                      value={expiry}
-                      onChange={e => setExpiry(formatExpiry(e.target.value))}
-                      maxLength={5}
-                    />
-                  </div>
-                  <div className="form-field">
-                    <label>CVV</label>
-                    <input
-                      type="text"
-                      placeholder="123"
-                      value={cvv}
-                      onChange={e => setCvv(e.target.value.replace(/\D/g, '').slice(0, 4))}
-                      maxLength={4}
-                    />
-                  </div>
-                </div>
-              </>
-            )}
-
             {isFree && (
               <div className="free-access-banner">
                 🎉 Promo code applied — no payment required!
@@ -321,12 +339,7 @@ export default function SubscriptionGate({ onSubscribe, onGoToSignIn }) {
               ) : isFree ? (
                 <>🎉 Activate Free Access</>
               ) : (
-                <>
-                  <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
-                    <rect x="1" y="4" width="22" height="16" rx="2" ry="2" /><line x1="1" y1="10" x2="23" y2="10" />
-                  </svg>
-                  Pay ${finalPrice}/month
-                </>
+                <>Continue to payment →</>
               )}
             </button>
 
@@ -335,7 +348,7 @@ export default function SubscriptionGate({ onSubscribe, onGoToSignIn }) {
                 <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
                   <rect x="3" y="11" width="18" height="11" rx="2" ry="2" /><path d="M7 11V7a5 5 0 0 1 10 0v4" />
                 </svg>
-                Payments secured by Stripe · Cancel anytime
+                Payments handled by Stripe · Card details never touch ClipStream
               </div>
             )}
           </form>

@@ -83,6 +83,7 @@ contextBridge.exposeInMainWorld('clipforge', {
     get: () => ipcRenderer.invoke('subscription:get'),
     set: (sub) => ipcRenderer.invoke('subscription:set', sub),
     check: () => ipcRenderer.invoke('subscription:check'),
+    startCheckout: () => ipcRenderer.invoke('subscription:startCheckout'),
   },
 
   // SMTP

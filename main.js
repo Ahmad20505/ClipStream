@@ -1804,11 +1804,19 @@ ipcMain.handle('settings:selectDir', async () => {
 });
 
 // ─── Subscription IPC ────────────────────────────────────────────────────────
-// NOTE: this handler is a client-only trust boundary and is fundamentally
-// bypassable — a user can edit electron-store's JSON by hand to flip `active`.
-// Real entitlement enforcement requires a backend that verifies a signed Stripe
-// receipt; the shape-validation below is just defensive tidying, not security.
+// Source of truth is the Cloudflare Worker (see server/). The local store is
+// only a read-cache so the UI can render instantly and so the app keeps working
+// through brief network outages. The cache is NEVER authoritative — the /check
+// handler always tries the Worker first and only falls back on failure.
+//
+// Promo codes ("promo_free") are still applied client-side via subscription:set
+// — that's acceptable because promos are issued by us for controlled beta/launch
+// access, not paid for. A user tampering with the store to inject a fake promo
+// is a non-commercial bypass (no money was lost).
+const SUBSCRIPTION_SERVER_URL = 'https://clipstream-subscription.clipstream-app.workers.dev';
+
 ipcMain.handle('subscription:get', async () => store.get('subscription'));
+
 ipcMain.handle('subscription:set', async (event, sub) => {
   const s = (sub && typeof sub === 'object') ? sub : {};
   const existing = store.get('subscription') || {};
@@ -1820,7 +1828,8 @@ ipcMain.handle('subscription:set', async (event, sub) => {
   const normalized = { active, plan, expiresAt, customerId };
   store.set('subscription', normalized);
 
-  // Send welcome receipt if this is a paid activation
+  // Send welcome receipt if this is a paid activation (only fires for promo
+  // activations now; real subscriptions get their receipts from Stripe directly).
   if (active && plan !== 'promo_free' && email && expiresAt) {
     const nextDate = new Date(expiresAt + 30 * 24 * 60 * 60 * 1000).toLocaleDateString('en-US', {
       year: 'numeric', month: 'long', day: 'numeric',
@@ -1830,14 +1839,85 @@ ipcMain.handle('subscription:set', async (event, sub) => {
 
   return { success: true };
 });
+
 ipcMain.handle('subscription:check', async () => {
-  const sub = store.get('subscription');
-  if (!sub.active) return { active: false };
-  if (sub.expiresAt && Date.now() > sub.expiresAt) {
-    store.set('subscription', { ...sub, active: false });
-    return { active: false };
+  const account = store.get('account');
+  const email = account && account.email;
+  const cached = store.get('subscription') || {};
+
+  // Promo subscriptions are local-only; don't overwrite with server state.
+  if (cached.plan === 'promo_free' && cached.active) {
+    return { active: true, plan: cached.plan, expiresAt: cached.expiresAt };
   }
-  return { active: true, plan: sub.plan, expiresAt: sub.expiresAt };
+
+  if (!email) return cachedSubscriptionResponse(cached);
+
+  try {
+    const ctrl = new AbortController();
+    const timer = setTimeout(() => ctrl.abort(), 5000);
+    const resp = await fetch(
+      `${SUBSCRIPTION_SERVER_URL}/subscription?email=${encodeURIComponent(email)}`,
+      { signal: ctrl.signal }
+    );
+    clearTimeout(timer);
+    if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+    const remote = await resp.json();
+
+    // Authoritative — overwrite cache.
+    store.set('subscription', {
+      active: !!remote.active,
+      plan: remote.plan || null,
+      expiresAt: remote.expiresAt || null,
+      customerId: cached.customerId || null,
+    });
+
+    return {
+      active: !!remote.active,
+      plan: remote.plan || null,
+      expiresAt: remote.expiresAt || null,
+    };
+  } catch (err) {
+    console.warn('[ClipStream] Subscription server unreachable, using cached state:', err.message);
+    return cachedSubscriptionResponse(cached);
+  }
+});
+
+function cachedSubscriptionResponse(cached) {
+  if (!cached.active) return { active: false };
+  if (cached.expiresAt && Date.now() > cached.expiresAt) return { active: false };
+  return { active: true, plan: cached.plan, expiresAt: cached.expiresAt };
+}
+
+// Opens a Stripe Checkout session in the user's default browser. The Worker
+// creates the session server-side so the Stripe secret key stays off the client.
+ipcMain.handle('subscription:startCheckout', async () => {
+  const account = store.get('account');
+  const email = account && account.email;
+  if (!email) return { success: false, error: 'Please sign in first.' };
+
+  try {
+    const ctrl = new AbortController();
+    const timer = setTimeout(() => ctrl.abort(), 10000);
+    const resp = await fetch(`${SUBSCRIPTION_SERVER_URL}/checkout`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ email }),
+      signal: ctrl.signal,
+    });
+    clearTimeout(timer);
+    if (!resp.ok) {
+      const body = await resp.text().catch(() => '');
+      throw new Error(`Checkout server returned ${resp.status}: ${body.slice(0, 200)}`);
+    }
+    const { url, error } = await resp.json();
+    if (error) throw new Error(error);
+    if (!url) throw new Error('No checkout URL returned.');
+    shell.openExternal(url);
+    return { success: true };
+  } catch (err) {
+    console.error('[ClipStream] subscription:startCheckout error:', err.message);
+    return { success: false, error: err.message };
+  }
 });
 
 // ─── Twitch Search IPC ───────────────────────────────────────────────────────
